@@ -1,0 +1,40 @@
+{
+  "_comment": "Copy to config.json in ~/.claude/brink/ and edit. The kill switch is a fixed path: create ~/.claude/brink/DISABLED to instantly disable Brink.",
+  "notify": {
+    "desktop": true
+  },
+  "thresholds": {
+    "five_hour": { "warn": [75, 85], "pause": 93 },
+    "seven_day": { "warn": [80, 90], "pause": 95 }
+  },
+  "_projection_comment": "Burn-rate projection (default ON). At each pre-tool check, if usage is within `headroom` points of the pause threshold AND the sustained burn rate (measured over at least min_span_sec of same-window sensor history) projects past the threshold within lookahead_min, Brink pauses pre-emptively - a few minutes early beats hitting the hard limit inside a long tool call, where no check runs and no pause is possible. Set enabled:false to pause only on the raw thresholds.",
+  "projection": {
+    "enabled": true,
+    "lookahead_min": 10,
+    "headroom": 12,
+    "min_span_sec": 120,
+    "window_sec": 600
+  },
+  "_reset_ping_comment": "Ping when a window rolls over (budget is back). 'enabled' off for 5h (resets several times a day = noise) / on for weekly (days of budget back). 'floor' = only ping if you were at/above this % before it reset, so a reset from low usage stays silent.",
+  "reset_ping": {
+    "five_hour": { "enabled": false, "floor": 75 },
+    "seven_day": { "enabled": true, "floor": 80 }
+  },
+  "_resume_comment": "Opt-in. skip_permissions=true relaunches with --dangerously-skip-permissions: the resumed agent runs WITHOUT permission prompts, unattended, in your project. Leave false unless you fully accept that. max_chain = safety cap on consecutive auto-resumes per session (a runaway task must not burn every window for days unattended); 0 = unlimited. in_place = win32-only: resume by injecting a continue prompt into the same window instead of relaunching a new one; only an explicit boolean true keeps it on. continue_prompt = the text typed into the resumed session; it must not start with / ! @ # and must not contain a newline (TUI-unsafe input falls back to the default prompt).",
+  "resume": {
+    "enabled": false,
+    "buffer_seconds": 90,
+    "skip_permissions": false,
+    "max_chain": 5,
+    "in_place": true,
+    "continue_prompt": "The usage limit has reset. Continue the task you paused before the pause - do not redo finished work."
+  },
+  "_watchdog_comment": "Opt-in, win32-only. Revives sessions whose PROCESS died mid-turn (terminal closed, crash, reboot) - no usage pause needed; this covers what scheduled resume can't. Turn on with `brink watchdog on` (also registers+starts the hidden logon daemon; `brink watchdog off` reverses everything). mode: off = feature dark (hooks exit immediately) | ask = toast only, revive manually with `brink revive` | auto = headless-revive after cancel_window_seconds (abort with `brink cancel`). max_revives_per_hour = global backstop across all sessions (0 = unlimited); revives also count toward resume.max_chain per session, and resume.skip_permissions applies to the revived run. revive_prompt has the same guards as continue_prompt.",
+  "watchdog": {
+    "mode": "off",
+    "poll_seconds": 60,
+    "cancel_window_seconds": 60,
+    "max_revives_per_hour": 3,
+    "revive_prompt": "This session was terminated unexpectedly while work was in progress. Review the recent conversation and continue the task - do not redo finished work."
+  }
+}

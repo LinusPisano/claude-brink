@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# logs
+*.log
+.claude-resume.log
+
+# local runtime state & secrets — NEVER commit a user's usage state or push keys
+config.json
+brink-state.json
+state.json
+*.local.json
+
+# Brink runtime output — transient, written into the project on each pause (rolling latest state)
+HANDOFF.md
+
+# OS
+.DS_Store
+Thumbs.db

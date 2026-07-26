@@ -1,0 +1,32 @@
+{
+  "name": "brink",
+  "owner": {
+    "name": "Linus Pisano",
+    "email": "pisanolinus@gmail.com"
+  },
+  "description": "Brink — graceful auto-pause + handoff for Claude Code before you hit a usage limit.",
+  "plugins": [
+    {
+      "name": "brink",
+      "source": "./",
+      "description": "Claude Code stops at the brink — gracefully auto-pauses your agent before a usage limit (writes HANDOFF.md + stops), notifies you with a desktop notification, and optionally resumes after the window resets.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Linus Pisano",
+        "email": "pisanolinus@gmail.com"
+      },
+      "license": "MIT",
+      "homepage": "https://github.com/LinusPisano/claude-brink",
+      "repository": "https://github.com/LinusPisano/claude-brink",
+      "keywords": [
+        "claude-code",
+        "usage-limit",
+        "rate-limit",
+        "auto-pause",
+        "handoff",
+        "notifications"
+      ],
+      "category": "workflow"
+    }
+  ]
+}

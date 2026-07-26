@@ -1,0 +1,40 @@
+{
+  "comment": "Brink plugin hooks (auto-discovered when installed via the Claude Code plugin marketplace). PreToolUse = graceful auto-pause before the limit; PostToolUse = threshold warning; UserPromptSubmit/Stop/SessionEnd = watchdog busy-markers (inert until config watchdog.mode is set - and the daemon itself still needs `brink watchdog on`, a plugin cannot register a scheduled task). ${CLAUDE_PLUGIN_ROOT} resolves to the installed plugin dir. NOTE: a plugin CANNOT register the statusLine (the usage sensor) — only 'agent'/'subagentStatusLine' are honored in a plugin's settings.json. The statusLine must be added by the user (one line) or by `node src/install.js --statusline`. Without it, state.json is never written and these hooks have no data to act on.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/brink.js\" claude pause" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/brink.js\" claude warn" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/brink.js\" claude busy" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/brink.js\" claude idle" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/brink.js\" claude end" }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "brink",
+  "displayName": "Brink",
+  "version": "1.0.0",
+  "description": "Claude Code stops at the brink — graceful auto-pause + handoff before you hit a usage limit, with optional auto-resume after reset.",
+  "author": {
+    "name": "Linus Pisano",
+    "email": "pisanolinus@gmail.com"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/LinusPisano/claude-brink",
+  "repository": "https://github.com/LinusPisano/claude-brink",
+  "keywords": [
+    "claude-code",
+    "usage-limit",
+    "rate-limit",
+    "auto-pause",
+    "handoff",
+    "notifications"
+  ]
+}

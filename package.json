@@ -1,0 +1,38 @@
+{
+  "name": "claude-brink",
+  "version": "1.0.0",
+  "description": "Claude Code stops at the brink — graceful auto-pause + handoff before you hit a usage limit, with optional auto-resume after reset.",
+  "license": "MIT",
+  "author": "Linus Pisano <pisanolinus@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LinusPisano/claude-brink.git"
+  },
+  "homepage": "https://github.com/LinusPisano/claude-brink#readme",
+  "keywords": [
+    "claude-code",
+    "usage-limit",
+    "rate-limit",
+    "auto-pause",
+    "handoff",
+    "notifications"
+  ],
+  "bin": {
+    "brink": "src/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node tests/run.js && node tests/core.test.js && node tests/handoff.test.js && node tests/install.test.js && node tests/reset.test.js && node tests/sensor-record.test.js && node tests/projection.test.js && node tests/resume.test.js && node tests/notify.test.js && node tests/cli.test.js && node tests/inject.test.js && node tests/detect.test.js && node tests/target.test.js && node tests/resumectx.test.js && node tests/dispatch.test.js && node tests/paths.test.js && node tests/toast-audit.test.js && node tests/watchdog.test.js",
+    "install-hooks": "node src/install.js",
+    "install-all": "node src/install.js --statusline"
+  },
+  "files": [
+    "src",
+    "hooks",
+    "config.example.json",
+    "README.md",
+    "LICENSE"
+  ]
+}
