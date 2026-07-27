@@ -22,11 +22,20 @@ is invisible to it on three independent levels:
    only re-renders on **main-session activity**. While a background workflow runs and the main
    session sits idle waiting for the completion notification, the statusline never re-renders,
    so `state.json` is **frozen at the pre-burn value**.
-2. **Decision logic only runs on main-session hooks.** Per `settings.json` / `hooks.json`,
-   brink fires on `PreToolUse` (pause), `PostToolUse` (warn), `UserPromptSubmit` (busy),
-   `Stop` (idle), `SessionEnd` (end). A workflow's **subagents do not fire the main session's
-   hooks**, and no main-session tool call happens during the ~15 min burn → **brink.js is never
-   invoked** while the tokens are being spent. Even if it were, per (1) it would read stale data.
+2. ~~**Decision logic only runs on main-session hooks.**~~ **RETRACTED 2026-07-27 — tested and
+   false.** The original claim was that a fan-out's subagents do not fire the main session's
+   hooks, so `brink.js` is never invoked during the burn. That was a hypothesis stated as a root
+   cause, and a direct test refutes it: an isolated session with a logging `PreToolUse` hook,
+   whose main agent was instructed to run **zero** tools apart from one `Task` call, produced
+   **four** hook invocations — `Agent` (the spawn) plus **all three** Bash commands the subagent
+   ran (`echo ALPHA_ONE` / `BETA_TWO` / `GAMMA_THREE`) — every one carrying the **parent
+   session_id**. Subagent tool calls *do* traverse the gate.
+   **Consequence:** during a fan-out `brink.js` is invoked, repeatedly. It allowed the burn not
+   because it never ran, but because per (1) every invocation read a **frozen** `state.json` and
+   saw a low percentage. The failure is stale *data*, not missing *invocation*.
+   **Still untested:** this test used a foreground `Task`. Whether a *background* `Workflow()` —
+   where the main session sits idle — routes its subagents' calls through the same hook is not
+   yet proven, and that was the 07-22 configuration.
 3. **The watchdog doesn't watch usage.** `watchdog.mode` is `auto` (daemon running), but
    `src/core/watchdog.js` / `watchdog.ps1` only do **crash-revival** (dead PID + surviving
    `busy_<sid>.json` marker). There is **no periodic usage poll**, so nothing samples the burn.
@@ -72,11 +81,26 @@ mattered, because nothing woke it.
    to brink, log it to `usage-history.jsonl` and retroactively warn. Verify whether this is
    hookable today.
 
-## Recommendation
+## Recommendation — REVISED 2026-07-27 after the hook test
 
-Ship **#1** first (an afternoon's work, kills the surprise). Then do **#3** as a safety net,
-and scope **#2** as the durable fix. #2 is the only one that also catches non-workflow idle
-burns (e.g. a long single agent), so it's the strategic target once #1 stops the bleeding.
+The original recommendation ("ship #1 first") rested on the retracted root cause #2. Now that
+subagent calls are known to reach the gate, **#1 is the wrong priority**: warning at fan-out
+launch treats a symptom of an invocation problem that does not exist. The gate already fires
+during the burn — it just cannot see the burn.
+
+Revised order:
+
+1. **#3 — staleness guard.** Now the highest-value cheap fix, because the gate *is* running on
+   every subagent call and could act on it immediately. If `state.json`'s `updated_at` is older
+   than N minutes at check time, say so instead of silently trusting a frozen reading.
+2. **#2 — usage source independent of the statusline render.** The durable fix, and the only one
+   that closes the general "main session idle while something burns" gap.
+3. **#1 — fan-out launch warning.** Demoted to a nicety; it may still be worth having as an
+   honest heads-up, but it is not the fix.
+
+Before building #2, settle the open question above: does a **background** `Workflow()` route its
+subagents through the hook the way a foreground `Task` does? If it does, #3 alone may largely
+close the hole.
 
 ---
 *Filed from a live session immediately after a background deep-research fan-out tripped
