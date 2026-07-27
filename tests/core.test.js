@@ -105,8 +105,11 @@ truthy('HANDOFF.md NOT written flat at <cwd>/HANDOFF.md', !fs.existsSync(path.jo
 // reverts to path.basename(handoffPath).
 const denyReason = JSON.parse(r2).hookSpecificOutput.permissionDecisionReason;
 truthy('deny reason is the new clean message', denyReason.includes('Paused by Brink'));
+// Assert the INTENT (an absolute, per-session path) rather than the surrounding
+// prose — the wording changed in the phantom-action fix and a phrase match would
+// have failed for a reason that has nothing to do with what this test guards.
 truthy('deny reason names the handoff ABSOLUTE path (not a bare basename)',
-  denyReason.includes('already saved to') && denyReason.includes(hp));
+  denyReason.includes(hp) && hp !== path.basename(hp));
 truthy('deny reason NOT self-contradictory (no commit / "Do NOT call")', !/commit|Do NOT call/.test(denyReason));
 // resume is disabled in this run — the deny must not promise an auto-resume
 // that was never armed (burn-in finding 2026-07-05).

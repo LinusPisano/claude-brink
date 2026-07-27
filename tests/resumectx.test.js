@@ -89,7 +89,7 @@ console.log('Case A — injectable target => ctx written:');
   // "HANDOFF.md" basename (which would send the paused model to a repo file that isn't
   // there). Parse the JSON so the check sees the unescaped path.
   let reasonA = ''; try { reasonA = JSON.parse(a.stdout).hookSpecificOutput.permissionDecisionReason; } catch {}
-  if (reasonA.includes('already saved to') && reasonA.includes(a.handoff)) ok('deny reason names the handoff ABSOLUTE path (not a bare basename)');
+  if (reasonA.includes(a.handoff) && a.handoff !== path.basename(a.handoff)) ok('deny reason names the handoff ABSOLUTE path (not a bare basename)');
   else bad('deny reason missing the handoff absolute path (' + JSON.stringify(a.handoff) + '): ' + JSON.stringify(reasonA.slice(0, 200)));
   try { fs.rmSync(a.sb,{recursive:true,force:true}); } catch {}
 }

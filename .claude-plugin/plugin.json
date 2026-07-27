@@ -1,7 +1,7 @@
 {
   "name": "brink",
   "displayName": "Brink",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Claude Code stops at the brink — graceful auto-pause + handoff before you hit a usage limit, with optional auto-resume after reset.",
   "author": {
     "name": "Linus Pisano",

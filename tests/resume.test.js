@@ -87,5 +87,18 @@ truthy('unarmed: tells the model the user must resume manually', unarmedMsg.incl
 truthy('no file: no save claim', !/saved/.test(pauseReason({ ...base, file: '', armed: false })));
 truthy('no resetText: no dangling reset clause', !pauseReason({ ...base, resetText: '', armed: true }).includes('resets at'));
 
+// A pause DENIES the tool call that was in flight — the action the turn announced
+// never ran. Burn-in 2026-07-15: a session announced a safety-backup Copy-Item,
+// Brink denied it, and the resumed session found NO backup on disk while the pause
+// message said "your progress is saved". Only a verify-before-delete habit stopped an
+// irreversible deletion from proceeding on a phantom backup. The message must say the
+// last call was denied, or "progress saved" reads as "everything I announced happened".
+console.log('pauseReason — denied in-flight call (phantom-action guard):');
+truthy('says the in-flight tool call was blocked', /was (denied|blocked)/i.test(armedMsg));
+truthy('tells the model to re-verify what the turn claimed to be doing', /re-?verify/i.test(armedMsg));
+truthy('warns even when no handoff file was written', /was (denied|blocked)/i.test(pauseReason({ ...base, file: '', armed: false })));
+truthy('states plainly that the announced action did not take effect',
+  /did NOT run|has not (run|happened|taken effect)/i.test(armedMsg));
+
 console.log('');
 if (fail) { console.log('SOME FAILED'); process.exit(1); } else { console.log('ALL PASS'); }

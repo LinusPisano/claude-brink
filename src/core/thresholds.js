@@ -117,4 +117,42 @@ function projectedDecision(usage, samples, cfg, proj, nowSec) {
   return best;
 }
 
-module.exports = { decide, bandFor, projectionCfg, projectedDecision };
+// --- Staleness guard (blind-spot report 2026-07-22, prioritised after the 07-27 hook test) ---
+// Brink reads usage from the state.json its statusline writes, and the statusline only
+// re-renders on MAIN-session activity. When work burns tokens away from the main
+// conversation — a background fan-out, a long idle wait — that file freezes at its
+// pre-burn value. The 07-27 test settled what was previously guessed: subagent tool
+// calls DO reach the gate, so brink.js runs throughout such a burn. It allowed the
+// 07-22 burn only because every check read a frozen number and believed it.
+//
+// A stale reading cannot tell us the real usage, so this NEVER pauses — pausing on age
+// alone is pausing on no evidence. It reports, and the caller warns. What it does buy:
+// a frozen "8%" stops being silently indistinguishable from a live "8%".
+const STALE_DEFAULT = { enabled: true, max_age_sec: 300 };
+
+function stalenessCfg(raw) {
+  const s = (raw && typeof raw.staleness === 'object' && raw.staleness) || {};
+  const n = Number(s.max_age_sec);
+  return {
+    enabled: s.enabled !== false, // default ON
+    max_age_sec: Number.isFinite(n) && n >= 30 && n <= 86400 ? Math.floor(n) : STALE_DEFAULT.max_age_sec,
+  };
+}
+
+// Returns null when fresh, disabled, or unjudgeable; otherwise {age_sec, max_age_sec}.
+// Pure — the caller supplies `now` so this stays testable without clock games.
+function stalenessCheck(usage, cfg, nowSec) {
+  if (!cfg || !cfg.enabled || !usage) return null;
+  const stamp = Number(usage.updated_at);
+  // No stamp at all: a state.json written before updated_at existed. Unknown age is
+  // not evidence of staleness — warning here would cry wolf on every legacy install.
+  if (!Number.isFinite(stamp) || stamp <= 0) return null;
+  const now = Number.isFinite(nowSec) ? nowSec : Math.floor(Date.now() / 1000);
+  const age = now - stamp;
+  // A stamp in the future means a skewed clock, not a stale read.
+  if (age < 0) return null;
+  if (age <= cfg.max_age_sec) return null;
+  return { age_sec: age, max_age_sec: cfg.max_age_sec };
+}
+
+module.exports = { decide, bandFor, projectionCfg, projectedDecision, stalenessCfg, stalenessCheck, STALE_DEFAULT };

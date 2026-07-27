@@ -4,7 +4,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { projectionCfg, projectedDecision } = require('../src/core/thresholds');
+const { projectionCfg, projectedDecision, stalenessCfg, stalenessCheck, STALE_DEFAULT } = require('../src/core/thresholds');
 const { pauseReason } = require('../src/core/resume');
 
 let fail = 0;
@@ -111,6 +111,90 @@ const out3 = execFileSync('node', [path.join(__dirname, '..', 'src', 'brink.js')
   { encoding: 'utf8', env, input: JSON.stringify({ cwd: sbCwd }), timeout: 15000 });
 eq('projection disabled => allow', out3.trim(), '');
 fs.rmSync(sb, { recursive: true, force: true });
+
+// --- Staleness guard (blind-spot report 2026-07-22, revised after the 07-27 hook test) ---
+// The 07-22 burn: a background fan-out spent ~5M tokens while the main session sat idle.
+// The 07-27 test proved subagent tool calls DO reach the gate, so brink.js WAS invoked
+// throughout — it just kept reading a state.json frozen before the burn began. A frozen
+// low reading is indistinguishable from a genuinely low one unless we look at its age.
+// The guard reports; it must never pause on age alone (we cannot know the real number).
+console.log('stalenessCfg:');
+eq('empty => defaults', stalenessCfg({}), STALE_DEFAULT);
+eq('enabled coerced to bool', stalenessCfg({ staleness: { enabled: 'yes' } }).enabled, true);
+eq('explicit false honored', stalenessCfg({ staleness: { enabled: false } }).enabled, false);
+eq('max_age floored', stalenessCfg({ staleness: { max_age_sec: 90.7 } }).max_age_sec, 90);
+eq('zero/negative max_age clamps to default', stalenessCfg({ staleness: { max_age_sec: 0 } }).max_age_sec, STALE_DEFAULT.max_age_sec);
+
+console.log('stalenessCheck:');
+const SCFG = STALE_DEFAULT;
+const SNOW = 1_800_000_000;
+eq('fresh reading => null', stalenessCheck({ updated_at: SNOW - 10 }, SCFG, SNOW), null);
+eq('exactly at max_age is NOT stale', stalenessCheck({ updated_at: SNOW - SCFG.max_age_sec }, SCFG, SNOW), null);
+truthy('older than max_age => reports', !!stalenessCheck({ updated_at: SNOW - SCFG.max_age_sec - 1 }, SCFG, SNOW));
+eq('reports the actual age', stalenessCheck({ updated_at: SNOW - 900 }, SCFG, SNOW).age_sec, 900);
+eq('disabled => null even when very stale', stalenessCheck({ updated_at: SNOW - 99999 }, { ...SCFG, enabled: false }, SNOW), null);
+// Never cry wolf on data we cannot judge: pre-`updated_at` state files, and clocks
+// that skew forward (a future stamp is not evidence of a stale read).
+eq('missing updated_at => null (cannot judge)', stalenessCheck({}, SCFG, SNOW), null);
+eq('future timestamp (clock skew) => null', stalenessCheck({ updated_at: SNOW + 120 }, SCFG, SNOW), null);
+// The guard is advisory only — pausing on age would pause on no evidence at all.
+truthy('never returns a pause action', !('action' in (stalenessCheck({ updated_at: SNOW - 900 }, SCFG, SNOW) || {})));
+
+// Wiring, not just units. The projection shipped with green unit tests and a dead
+// trigger because it was gated on `action === 'allow'` while the headroom zone always
+// sits inside a WARN band. Staleness has the mirror-image trap: a frozen reading is
+// almost always LOW, so the gate decides `allow` and exits — a guard placed after that
+// exit can never fire. These run the real brink.js and assert the on-disk side effect.
+console.log('staleness wiring through brink.js (sandboxed):');
+const ssb = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-stale-'));
+const ssbCwd = ssb.replace(/\\/g, '/');
+const sNow = Math.floor(Date.now() / 1000);
+const staleFlags = () => fs.readdirSync(ssb).filter((f) => /^stale/i.test(f));
+const writeState = (updatedAt) => fs.writeFileSync(path.join(ssb, 'state.json'), JSON.stringify({
+  five_pct: 8, week_pct: 10, five_reset: sNow + 3000, week_reset: sNow + 500000,
+  session_id: 'stale', cwd: ssbCwd, updated_at: updatedAt,
+}));
+const runGate = () => execFileSync('node', [path.join(__dirname, '..', 'src', 'brink.js'), 'claude', 'pause'],
+  { encoding: 'utf8', env: { ...process.env, BRINK_DIR: ssb, BRINK_SILENT: '1', CLAUDE_PROJECT_DIR: ssbCwd },
+    input: JSON.stringify({ cwd: ssbCwd }), timeout: 15000 });
+
+// 20 minutes stale at 8% — exactly the 07-22 shape: a low number nobody should trust.
+writeState(sNow - 1200);
+const staleOut = runGate();
+eq('stale reading still ALLOWS (never pause on age alone)', staleOut.trim(), '');
+truthy('stale reading fires the guard (flag on disk)', staleFlags().length === 1);
+
+// Same frozen stamp must not re-notify on every subsequent tool call.
+runGate();
+truthy('debounced while the stamp stays frozen', staleFlags().length === 1);
+
+// Control: a fresh reading must leave no trace — proves the flag above came from age.
+fs.rmSync(ssb, { recursive: true, force: true }); fs.mkdirSync(ssb, { recursive: true });
+writeState(sNow);
+runGate();
+truthy('fresh reading fires nothing', staleFlags().length === 0);
+
+// Control: opt-out honored.
+fs.writeFileSync(path.join(ssb, 'config.json'), JSON.stringify({ staleness: { enabled: false } }));
+writeState(sNow - 1200);
+runGate();
+truthy('staleness disabled => silent', staleFlags().length === 0);
+
+// Every per-freeze flag is a file. Without a GC prefix they accumulate forever — the
+// same leak the resume-ctx sweep was added to stop. Old flags must age out like the rest.
+fs.rmSync(path.join(ssb, 'config.json'), { force: true });
+const oldFlag = path.join(ssb, 'stale_claude_1700000000');
+fs.writeFileSync(oldFlag, '');
+const old = Date.now() - 15 * 24 * 3600 * 1000; // 15 days > FLAG_TTL_MS (14d)
+fs.utimesSync(oldFlag, old / 1000, old / 1000);
+// gcFlags() only runs past the allow-exit, so drive a real WARN (80% = warn band).
+fs.writeFileSync(path.join(ssb, 'state.json'), JSON.stringify({
+  five_pct: 80, week_pct: 10, five_reset: sNow + 3000, week_reset: sNow + 500000,
+  session_id: 'stale', cwd: ssbCwd, updated_at: sNow,
+}));
+runGate();
+truthy('stale flags older than the TTL are swept', !fs.existsSync(oldFlag));
+fs.rmSync(ssb, { recursive: true, force: true });
 
 console.log('');
 if (fail) { console.log('SOME FAILED'); process.exit(1); } else { console.log('ALL PASS'); }

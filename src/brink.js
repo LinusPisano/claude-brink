@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { decide, projectionCfg, projectedDecision } = require('./core/thresholds');
+const { decide, projectionCfg, projectedDecision, stalenessCfg, stalenessCheck } = require('./core/thresholds');
 const { readHistory } = require('./core/sensor-record');
 const { writeHandoff } = require('./core/handoff');
 const { shouldArm, armArgs, chainAllowed, pauseReason, resumeCfg } = require('./core/resume');
@@ -163,7 +163,9 @@ function gcFlags() {
       // busy_<sid>.json (watchdog markers) normally die via the idle/end hooks or
       // the daemon itself; the TTL sweep only catches strays (e.g. a reboot with
       // the watchdog off) — 14 days stale means nothing left worth reviving.
-      if (!/^(notified|armed|chain|busy)_/.test(f) && !/^resume-ctx-/.test(f)) continue;
+      // stale_<adapter>_<frozen stamp>: one file per sensor freeze (staleness guard).
+      // Keyed on a timestamp that never repeats, so without a sweep they pile up.
+      if (!/^(notified|armed|chain|busy|stale)_/.test(f) && !/^resume-ctx-/.test(f)) continue;
       const p = path.join(DIR, f);
       try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch {}
     }
@@ -294,6 +296,24 @@ async function main() {
       }
     } catch { /* projection is an enhancement — never let it break the gate */ }
   }
+  // Staleness guard — MUST run before the allow-exit below. A frozen state.json almost
+  // always reads LOW, so `d.action` is `allow` in exactly the case this guard exists
+  // for; putting it after the exit would make it dead code (the same shape as the
+  // projection's `=== 'allow'` wiring bug). Advisory only: it never changes `d`.
+  try {
+    const st = stalenessCheck(usage, stalenessCfg(rawCfg), Math.floor(Date.now() / 1000));
+    if (st) {
+      fs.mkdirSync(DIR, { recursive: true });
+      // Keyed on the frozen stamp itself: while the sensor stays stuck the key never
+      // changes, so this notifies once per freeze instead of once per tool call.
+      const sflag = path.join(DIR, `stale_${adapterName}_${usage.updated_at}`.replace(/[^\w.-]/g, '_'));
+      if (!fs.existsSync(sflag)) {
+        fs.writeFileSync(sflag, '');
+        notify(`Brink: usage data is ${Math.round(st.age_sec / 60)} min stale - the last reading (${Math.round(usage.five_pct)}% 5h) may be far behind. Background work (a Workflow or subagent fan-out) can burn the window without refreshing it.`);
+      }
+    }
+  } catch { /* advisory only — never let the guard break the gate */ }
+
   if (d.action === 'allow') process.exit(0);
 
   fs.mkdirSync(DIR, { recursive: true });

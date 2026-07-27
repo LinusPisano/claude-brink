@@ -15,6 +15,11 @@
     "min_span_sec": 120,
     "window_sec": 600
   },
+  "_staleness_comment": "Brink reads usage from the state file the statusline writes, and the statusline only refreshes on main-session activity. Work that burns tokens away from the main conversation (a background workflow, a large subagent fan-out) can leave that reading frozen while the real usage climbs. When a reading is older than max_age_sec, Brink says so instead of trusting it. It never pauses on age alone - a stale reading cannot tell anyone the real number - so this is a warning, not a gate.",
+  "staleness": {
+    "enabled": true,
+    "max_age_sec": 300
+  },
   "_reset_ping_comment": "Ping when a window rolls over (budget is back). 'enabled' off for 5h (resets several times a day = noise) / on for weekly (days of budget back). 'floor' = only ping if you were at/above this % before it reset, so a reset from low usage stays silent.",
   "reset_ping": {
     "five_hour": { "enabled": false, "floor": 75 },

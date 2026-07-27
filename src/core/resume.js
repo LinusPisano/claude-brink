@@ -87,8 +87,14 @@ function armArgs(cfg, ctx) {
 // never claim an action that did not happen. Tool-neutral wording — this reason
 // is shared by the claude and codex adapters.
 function pauseReason({ pct, window, resetText, file, armed, projected }) {
+  // A pause DENIES the tool call that was in flight, so whatever this turn announced
+  // it was doing never actually ran. Saying only "your progress is saved" invites the
+  // model — and the user reading it — to treat the announced action as done. Burn-in
+  // 2026-07-15: a safety-backup copy was announced, denied, and a later session almost
+  // deleted a cloud remote trusting a backup that did not exist.
+  const denied = `The tool call that was in flight was denied and did NOT run — nothing this turn said it was doing has taken effect. Re-verify any such action before relying on it. `;
   const saved = file
-    ? `Your progress and next steps are already saved to ${file}. `
+    ? `Your notes and next steps (not your pending actions) are saved to ${file}. `
     : ''; // never claim a save that did not happen (review finding)
   const tail = armed
     ? `Brink has scheduled an auto-resume${file ? ' from the handoff' : ''} shortly after the reset`
@@ -99,7 +105,7 @@ function pauseReason({ pct, window, resetText, file, armed, projected }) {
     ? `Paused by Brink (pre-emptive): you are at ${Math.round(pct)}% of your ${window} usage limit and burning ~${projected.rate_per_min}%/min — projected past the ${projected.threshold}% pause threshold within ${projected.lookahead_min} min`
     : `Paused by Brink: you are at ${Math.round(pct)}% of your ${window} usage limit`;
   return head +
-    `${resetText ? `, which resets at ${resetText}` : ''}. ${saved}` +
+    `${resetText ? `, which resets at ${resetText}` : ''}. ${denied}${saved}` +
     `Stop here and reply to the user in plain text — do not start new work; ${tail}. ` +
     `Tell the user: any prompts they send now won't be queued yet (that's coming) — and they can disable Brink at any time with \`brink off\`.`;
 }
