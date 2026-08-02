@@ -116,3 +116,21 @@ minimum downgrade pause → warn when `model` differs from the bucket's dominant
 3. **[cheap] Whitelist `brink` CLI in the deny path.**
 4. **[after probe] Model-aware thresholds** per the probe outcome.
 5. **[template] Standing "re-verify external connections" line in HANDOFF.md.**
+
+## Addendum 2026-08-02: kill switch does not cancel scheduled resumes (defect 5, observed live)
+
+The auto-resume scheduled by the 07-31 weekly pause **fired on 2026-08-02 after the 08:00
+reset even though the `DISABLED` file had been present since 07-31 01:10** (`brink off`, never
+re-enabled). The resumed session found a stale HANDOFF describing work that had been completed
+manually two days earlier, re-read it, and had to verify-and-report instead of work.
+
+Source-consistent: `src/resume-once.ps1` gates on the weekly/5h pause thresholds
+(lines ~35–38) but never checks the `DISABLED` hatch — the kill-switch scan in the codebase
+hits `brink.js`, `cli.js`, and `watchdog.ps1` only. `brink off` therefore disarms *enforcement*
+but not *already-scheduled Task Scheduler resumes*.
+
+Cost of the defect: one wasted resume invocation against a completed task (tokens + a
+confusing "continue the task" prompt). Fix: `resume-once.ps1` should exit early when
+`DISABLED` exists (mirroring `watchdog.ps1`'s check), and `brink off` should optionally sweep
+pending `armed_*`/scheduled-task entries — or at least the pause message should say that
+scheduled resumes survive the kill switch.
