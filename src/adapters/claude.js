@@ -23,6 +23,7 @@ function readUsage() {
       updated_at: num(s.updated_at),
       session_id: s.session_id || '',
       cwd: s.cwd || '',
+      model: s.model || '',
     };
   } catch { return null; }
 }

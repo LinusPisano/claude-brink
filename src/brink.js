@@ -165,7 +165,10 @@ function gcFlags() {
       // the watchdog off) — 14 days stale means nothing left worth reviving.
       // stale_<adapter>_<frozen stamp>: one file per sensor freeze (staleness guard).
       // Keyed on a timestamp that never repeats, so without a sweep they pile up.
-      if (!/^(notified|armed|chain|busy|stale)_/.test(f) && !/^resume-ctx-/.test(f)) continue;
+      // released_<sid> (per-session release hatch, report 2026-07-31): sessions are
+      // ephemeral, so a released sid stops mattering when the session dies — the TTL
+      // sweep is its natural end of life.
+      if (!/^(notified|armed|chain|busy|stale|released)_/.test(f) && !/^resume-ctx-/.test(f)) continue;
       const p = path.join(DIR, f);
       try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch {}
     }
@@ -328,12 +331,17 @@ async function main() {
 
   if (mode === 'pause' && d.action === 'pause') {
     const hook = await readStdin();
-    // Project ROOT, not shell cwd: hook.cwd drifts with mid-session `cd`s, and
-    // `claude --resume` is project-scoped — a resume launched from the drifted dir
-    // finds no conversation (burn-in finding 2026-07-06). CLAUDE_PROJECT_DIR is the
-    // hook env's stable anchor; verified it stays on the session root while cwd drifts.
-    const cwd = process.env.CLAUDE_PROJECT_DIR || hook.cwd || usage.cwd || process.cwd();
-    const rt = resetText(d.reset);
+
+    // Report 2026-07-31 defect 3: while paused, EVERY tool call was denied — including
+    // `brink --help`, the very command the agent needed to find a narrower escape than
+    // the global kill switch. Let the brink CLI itself through the gate: only a bare
+    // `brink` invocation with word-shaped args (no shell metacharacters, no chaining),
+    // so the escape hatch cannot double as an arbitrary-command tunnel.
+    try {
+      const toolCmd = String((hook.tool_input && hook.tool_input.command) || '');
+      const shellTool = hook.tool_name === 'Bash' || hook.tool_name === 'PowerShell';
+      if (shellTool && /^\s*brink(\.cmd)?(\s+[\w.:\\/-]+)*\s*$/.test(toolCmd)) process.exit(0);
+    } catch { /* whitelist is best-effort; fall through to the normal deny */ }
 
     // Prefer the hook's own session_id — the shared state.json may hold another
     // concurrent session's id (multi-window finding). Computed BEFORE the handoff
@@ -342,6 +350,22 @@ async function main() {
     // nests under this sid, out of the user's repo entirely:
     // ~/.claude/brink/<project-slug>/<sid>/.
     const ctx_sid = hook.session_id || usage.session_id;
+
+    // Per-session release hatch (report 2026-07-31 defect 2): `brink release <sid>`
+    // lifts enforcement for ONE session while the safety net stays up for every other
+    // session on the machine — a weekly pause has a multi-day horizon, and the only
+    // escape used to be the global `brink off`. Checked here (not at the top) because
+    // only the pause path knows which session it is about to block.
+    try {
+      if (ctx_sid && fs.existsSync(path.join(DIR, 'released_' + paths.sanitizeSid(ctx_sid)))) process.exit(0);
+    } catch { /* hatch is best-effort; fall through to the normal deny */ }
+
+    // Project ROOT, not shell cwd: hook.cwd drifts with mid-session `cd`s, and
+    // `claude --resume` is project-scoped — a resume launched from the drifted dir
+    // finds no conversation (burn-in finding 2026-07-06). CLAUDE_PROJECT_DIR is the
+    // hook env's stable anchor; verified it stays on the session root while cwd drifts.
+    const cwd = process.env.CLAUDE_PROJECT_DIR || hook.cwd || usage.cwd || process.cwd();
+    const rt = resetText(d.reset);
 
     // Every Brink file for this pause nests under ONE per-session dir (core/paths),
     // out of the user's repo entirely: ~/.claude/brink/<project-slug>/<sid>/. Computed
@@ -383,7 +407,12 @@ async function main() {
           try { tgt = JSON.parse((det.stdout || '').trim()); } catch {}
         }
         if (tgt && tgt.Injectable) {
-          const resumeCtx = { ...tgt, sid: ctx_sid, proj: cwd, continue_prompt: rc.continue_prompt };
+          // transcript_path (report 2026-07-27): the ONLY artifact reliably bound to THIS
+          // session id. The dispatcher watches it after injecting — if the file doesn't
+          // grow, the keystrokes landed somewhere else (wrong terminal / concurrent
+          // session) and the dispatcher must fall back to headless instead of declaring
+          // success and deleting the recovery artifacts.
+          const resumeCtx = { ...tgt, sid: ctx_sid, proj: cwd, continue_prompt: rc.continue_prompt, transcript_path: hook.transcript_path || '' };
           // Nested under the same per-session dir as HANDOFF.md, not a flat DIR-root
           // file — out of the user's repo (pre-launch Task 3).
           resumeCtxPath = path.join(sdir, 'resume-ctx.json');
@@ -451,7 +480,7 @@ async function main() {
     // bare "HANDOFF.md" basename would point the model at a file that isn't there.
     // (A friendlier "run: brink handoff" phrasing can replace this once Task 6 lands.)
     const file = handoffPath || '';
-    const reason = pauseReason({ pct: d.pct, window: d.window, resetText: rt, file, armed, projected: d.projected });
+    const reason = pauseReason({ pct: d.pct, window: d.window, resetText: rt, file, armed, projected: d.projected, sid: ctx_sid });
     const out = adapter.denyOutput(reason);
     if (out.stdout) process.stdout.write(out.stdout);
     if (out.stderr) process.stderr.write(out.stderr);

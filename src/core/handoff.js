@@ -14,8 +14,15 @@ function readTranscript(p) {
   } catch { return []; }
 }
 
+// Tool names that imply a connection OUTSIDE this process tree: MCP servers, browser
+// CDP/DevTools bridges, tunnels, dev servers. These rarely survive a pause (report
+// 2026-07-31 defect 4: the Chrome remote-debugging channel died across a pause and
+// cost ~25 min of troubleshooting because the resumed session trusted it was still up).
+const EXTERNAL_TOOL_RE = /^mcp__|chrome|browser|playwright|puppeteer|devtools|cdp|tunnel/i;
+
 function summarize(events) {
   let lastUser = '';
+  let usedExternal = false;
   const actions = [];
   for (const e of events) {
     const msg = e.message || e;
@@ -31,13 +38,14 @@ function summarize(events) {
     if (role === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
         if (c.type === 'tool_use') {
+          if (EXTERNAL_TOOL_RE.test(String(c.name || ''))) usedExternal = true;
           const tgt = (c.input && (c.input.file_path || c.input.path || c.input.command)) || '';
           actions.push(`${c.name}${tgt ? ' -> ' + String(tgt).slice(0, 80) : ''}`);
         }
       }
     }
   }
-  return { lastUser: String(lastUser || '').slice(0, 800), actions: actions.slice(-8) };
+  return { lastUser: String(lastUser || '').slice(0, 800), actions: actions.slice(-8), usedExternal };
 }
 
 // Neutralise anything that could terminate the fenced block early. Backtick runs of 3+
@@ -54,7 +62,7 @@ function fenceSafe(s) {
 
 function writeHandoff({ transcriptPath, outPath, pct, window, resetText, isGit }) {
   const events = transcriptPath ? readTranscript(transcriptPath) : [];
-  const { lastUser, actions } = summarize(events);
+  const { lastUser, actions, usedExternal } = summarize(events);
   const lines = [
     '# HANDOFF - paused by Brink',
     '',
@@ -90,6 +98,12 @@ function writeHandoff({ transcriptPath, outPath, pct, window, resetText, isGit }
     '',
     '## Next steps',
     '',
+    // STEP 0 fires only when the transcript shows external-connection tool use — the
+    // 07-27 handoff happened to warn about this because a HUMAN wrote it in manually;
+    // this makes it structural (report 2026-07-31 defect 4).
+    ...(usedExternal ? [
+      '- STEP 0: this session used external connections (MCP servers, browser CDP/DevTools, tunnels, or dev servers). They rarely survive a pause - re-verify and reconnect them BEFORE resuming the task list.',
+    ] : []),
     '- Continue the task above from where it stopped.',
     isGit ? '- This IS a git repo - review uncommitted changes before continuing.' : '- (not a git repo - nothing to commit)',
     '',

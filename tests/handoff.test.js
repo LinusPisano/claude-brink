@@ -106,6 +106,26 @@ const outPath3 = path.join(dir, 'sess3', 'HANDOFF.md');
 const out2 = writeHandoff({ transcriptPath: '/nonexistent', outPath: outPath3, pct: 99, window: 'weekly', resetText: '', isGit: false });
 truthy('still writes a minimal HANDOFF', out2 && fs.existsSync(out2) && /could not read/.test(fs.readFileSync(out2, 'utf8')));
 
+// Report 2026-07-31 defect 4: external connections (browser CDP, MCP servers, tunnels)
+// rarely survive a pause — the 07-27 handoff only warned about it because a human wrote
+// the warning in manually. When the transcript shows such tool use, the STEP 0 line
+// must be structural; when it doesn't, it must not appear (noise erodes trust).
+console.log('external-connection STEP 0 line:');
+const txExt = path.join(dir, 't-ext.jsonl');
+fs.writeFileSync(txExt, [
+  JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Update the X profile' }] } }),
+  JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'mcp__chrome-devtools__navigate_page', input: {} }] } }),
+].join('\n'));
+const outExt = path.join(dir, 'sess-ext', 'HANDOFF.md');
+writeHandoff({ transcriptPath: txExt, outPath: outExt, pct: 95, window: 'weekly', resetText: '', isGit: false });
+const mdExt = fs.readFileSync(outExt, 'utf8');
+truthy('MCP/browser tool use -> STEP 0 reconnect line present', /STEP 0:.*external connections/.test(mdExt));
+truthy('STEP 0 comes before the continue bullet', mdExt.indexOf('STEP 0:') < mdExt.indexOf('Continue the task above'));
+// The plain-tools transcript (tx: Edit + Bash) must NOT get the line.
+truthy('no external tool use -> no STEP 0 line', !/STEP 0:/.test(md));
+truthy('summarize flags external use', summarize(readTranscript(txExt)).usedExternal === true);
+truthy('summarize does not flag plain tools', summarize(readTranscript(tx)).usedExternal === false);
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('');
 if (fail) { console.log('SOME FAILED'); process.exit(1); } else { console.log('ALL PASS'); }

@@ -4,7 +4,7 @@
 
 Brink pauses Claude Code gracefully at your usage limit, writes a handoff of exactly what was in flight, and — on Windows — resumes your live session in place the moment your quota resets. Elsewhere, you get the pause and the handoff; you resume by hand.
 
-[![version](https://img.shields.io/badge/version-1.0.2-blue)](#status) [![platform](https://img.shields.io/badge/Claude%20Code-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#support-matrix) [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
+[![version](https://img.shields.io/badge/version-1.1.0-blue)](#status) [![platform](https://img.shields.io/badge/Claude%20Code-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#support-matrix) [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 <!-- DEMO GIF GOES HERE — replace with docs/demo.gif (captured separately: a real pause -> reset -> in-place resume cycle) -->
 <p align="center"><em>[ demo.gif — Brink pausing at the limit, then nudging the same session back to life on reset ]</em></p>
@@ -75,11 +75,12 @@ brink watchdog on [--mode auto|ask] | off | status revive-after-kill daemon (Win
 brink revive [<session-id>]                        revive the newest dead mid-work session now
 brink cancel                                       abort a pending auto-revive in its cancel window
 brink off | on                                      kill switch — instant disable / re-enable
+brink release <session-id> [--undo]                lift the pause for ONE session only
 brink uninstall [--purge]                          remove cleanly, restores your original statusline
 brink version
 ```
 
-`brink off` is the escape hatch: it drops a file that makes every hook a no-op immediately, no reinstall needed. `brink uninstall` is surgical — it only removes Brink's own hook entries and restores your statusline from the backup `brink init` made, it never touches anything else in `settings.json`.
+`brink off` is the escape hatch: it drops a file that makes every hook a no-op immediately, no reinstall needed. It disarms **every** session on the machine, though — for a weekly pause with a multi-day horizon, that can be more than you meant. `brink release <session-id>` is the surgical version: it lifts enforcement for that one session while everything else stays protected (the pause message prints the exact command with the id filled in; `--undo` re-arms it). While paused, the `brink` CLI itself is let through the tool-call gate — args must be plain words, no shell metacharacters — so you can run `brink release`/`brink status` from inside the paused session instead of hunting for another terminal. `brink uninstall` is surgical too — it only removes Brink's own hook entries and restores your statusline from the backup `brink init` made, it never touches anything else in `settings.json`.
 
 ## Watchdog: survive a closed terminal (opt-in, Windows)
 
@@ -104,13 +105,14 @@ v1 is Claude Code only. Planned next, in no particular order:
 - **GitHub Copilot CLI**
 - **Cursor**
 - Auto-resume for macOS/Linux (launchd/cron equivalents of the Windows Task Scheduler path).
+- **Model-aware weekly thresholds** — the usage meter Brink reads has no model dimension, so a weekly pause can fire on a bucket the session's model may not even be drawing from. Since 1.1.0 the session's model (and any extra rate-limit buckets in the payload) is recorded in state + usage history as groundwork; acting on it waits on a probe of whether the statusline meter is per-model or shared.
 
 If you want one of these sooner, open an issue — real usage shapes the order.
 
 ## Honest caveats
 
 - **Resume is opt-in and young.** It's off by default. Enabling it means an agent can restart and keep working **unattended, while you're away** — read the `skip_permissions` warning above before turning that on too.
-- **In-place resume writes keystrokes, it doesn't confirm the model acted on them.** A successful injection means the text reached your terminal's input buffer, not that the turn ran to completion — there's no signal back from a live session to prove that.
+- **In-place resume writes keystrokes, it doesn't confirm the model acted on them.** A successful injection means the text reached your terminal's input buffer, not that the turn ran to completion. Since 1.1.0 the dispatcher watches the session's own transcript after injecting — if it doesn't grow within a minute, the keystrokes are presumed to have landed in the wrong window and it falls back to a headless resume, logging every step to the session's `.claude-resume.log`. That verifies the input *arrived*; it still can't prove the turn ran to completion.
 - **The watchdog can revive a session you killed on purpose.** If you force-kill mid-turn *because* the agent was doing something wrong, `auto` mode will try to bring it back — that's what the toast + cancel window (and `ask` mode) are for. And if you already resumed the session yourself elsewhere, a revive creates a second branch of the same conversation. The watchdog can't tell these apart; the cancel window is the guard.
 - **The usage sensor depends on an undocumented Claude Code surface.** Claude Code pipes `rate_limits` to the statusline today; that's not a versioned API. Some API-key/enterprise setups don't receive usage data at all — `brink doctor` tells you if that's you.
 - **A 5h reset doesn't clear the weekly cap.** Brink tracks both windows independently and tells you which one you're actually hitting.
@@ -123,7 +125,7 @@ If you want one of these sooner, open an issue — real usage shapes the order.
 
 ## Status
 
-**v1.0.2 — first public release series.** The pause + handoff core has been through an adversarial review pass and twelve days of continuous dogfooding on **Windows 11** (12 real 5h pauses, a first weekly pause, 13 chained auto-resumes, 3 watchdog revives — the full record, including what it got wrong, is in [`docs/burn-in-report-2026-07.md`](docs/burn-in-report-2026-07.md)). Resume and the cross-platform notifier are newer and have days, not months, of real-world runtime — that's why resume ships off by default and `brink doctor` exists. The macOS/Linux path is cross-platform by design but **not yet verified on real hardware**. If you hit something, `brink doctor` output in a GitHub issue is the fastest way to help fix it.
+**v1.1.0 — first public release series.** The pause + handoff core has been through an adversarial review pass and twelve days of continuous dogfooding on **Windows 11** (12 real 5h pauses, a first weekly pause, 13 chained auto-resumes, 3 watchdog revives — the full record, including what it got wrong, is in [`docs/burn-in-report-2026-07.md`](docs/burn-in-report-2026-07.md)). 1.1.0 is the field-report release: per-session `brink release`, transcript-verified in-place resume with a dispatch log, handoff preservation, and model recording all come out of two dogfooding reports ([`docs/concurrent-resume-report-2026-07-27.md`](docs/concurrent-resume-report-2026-07-27.md), [`docs/model-blind-weekly-pause-report-2026-07-31.md`](docs/model-blind-weekly-pause-report-2026-07-31.md)). Resume and the cross-platform notifier are newer and have days, not months, of real-world runtime — that's why resume ships off by default and `brink doctor` exists. The macOS/Linux path is cross-platform by design but **not yet verified on real hardware**. If you hit something, `brink doctor` output in a GitHub issue is the fastest way to help fix it.
 
 Anthropic explicitly declined a configurable usage-threshold-alert feature request ([claude-code#17431](https://github.com/anthropics/claude-code/issues/17431)). Brink is that feature, built as a drop-in — plus the handoff and resume layer on top.
 

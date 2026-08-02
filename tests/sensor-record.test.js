@@ -92,13 +92,22 @@ const script = path.join(__dirname, '..', 'src', 'statusline-brink.js');
 const env = { ...process.env, BRINK_DIR: tmp2, BRINK_NO_RESET_PING: '1' };
 const out = execFileSync('node', [script], {
   input: JSON.stringify({ session_id: 's-sl', workspace: { current_dir: '/p' },
-    rate_limits: { five_hour: { used_percentage: 42, resets_at: E }, seven_day: { used_percentage: 7, resets_at: E + 500 } } }),
+    model: { id: 'claude-fable-5', display_name: 'Fable' },
+    rate_limits: { five_hour: { used_percentage: 42, resets_at: E }, seven_day: { used_percentage: 7, resets_at: E + 500 },
+      fable_weekly: { used_percentage: 12 } } }),
   env, encoding: 'utf8',
 });
 truthy('statusline renders', /5h:42%/.test(out));
 const sst = JSON.parse(fs.readFileSync(path.join(tmp2, 'state.json'), 'utf8'));
 truthy('statusline state has updated_at', typeof sst.updated_at === 'number');
+// Report 2026-07-31 defect 1: the pause decision's inputs must carry the model
+// dimension, and any rate-limit buckets beyond the two we read must at least be NAMED
+// (the per-model-bucket probe) instead of silently dropped.
+eq('statusline state records the session model', sst.model, 'claude-fable-5');
+eq('statusline state names extra rate-limit buckets', sst.rl_extra, ['fable_weekly']);
 eq('statusline history written', readHistory(tmp2).length, 1);
+eq('history line carries the model', readHistory(tmp2)[0].model, 'claude-fable-5');
+eq('history line carries rl_extra', readHistory(tmp2)[0].rl_extra, ['fable_weekly']);
 // drop through the statusline: seed high, feed low, must not crash (ping suppressed by env)
 fs.writeFileSync(path.join(tmp2, 'state.json'),
   JSON.stringify({ five_pct: 50, week_pct: 95, five_reset: E, week_reset: E + 500, session_id: 's-sl', cwd: '/p' }));

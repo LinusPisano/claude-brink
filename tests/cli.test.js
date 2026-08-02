@@ -77,6 +77,24 @@ truthy('DISABLED file removed', !fs.existsSync(path.join(bd, 'DISABLED')));
 const paused2 = execFileSync('node', [brink, 'claude', 'pause'], { encoding: 'utf8', env, input: '{}' });
 truthy('pause works again after brink on', paused2.includes('"permissionDecision":"deny"'));
 
+console.log('release (per-session hatch, report 2026-07-31):');
+const rel = run(['release', 's']);
+truthy('release reports the session freed', /RELEASED/.test(rel));
+truthy('released_<sid> flag created', fs.existsSync(path.join(bd, 'released_s')));
+// end-to-end: the released session (sid 's' via state.json fallback) passes the gate...
+const pausedRel = execFileSync('node', [brink, 'claude', 'pause'], { encoding: 'utf8', env, input: '{}' });
+eq('released session passes the pause gate end-to-end', pausedRel.trim(), '');
+// ...while another session on the same machine is still protected.
+const pausedOther = execFileSync('node', [brink, 'claude', 'pause'], { encoding: 'utf8', env, input: JSON.stringify({ session_id: 'someone-else' }) });
+truthy('other sessions still paused while one is released', pausedOther.includes('"permissionDecision":"deny"'));
+const relUndo = run(['release', 's', '--undo']);
+truthy('release --undo reports re-protection', /protected/.test(relUndo));
+truthy('released_<sid> flag removed by --undo', !fs.existsSync(path.join(bd, 'released_s')));
+const pausedAfterUndo = execFileSync('node', [brink, 'claude', 'pause'], { encoding: 'utf8', env, input: '{}' });
+truthy('pause enforced again after release --undo', pausedAfterUndo.includes('"permissionDecision":"deny"'));
+const relNoSid = runSafe(['release']);
+truthy('release without a sid exits 1 with usage', relNoSid.status === 1 && /usage: brink release/.test(relNoSid.stderr));
+
 console.log('doctor:');
 // runSafe (not run): a doctor check that fails must surface as a FAIL assertion, never
 // an uncaught execFileSync throw that kills the rest of the npm test chain.

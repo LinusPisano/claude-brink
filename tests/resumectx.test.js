@@ -30,7 +30,7 @@ function pauseWith(detectOverride) {
   fs.writeFileSync(path.join(sb,'state.json'), JSON.stringify({ five_pct:99, week_pct:10, five_reset:future, week_reset:future+500000, session_id:'ctxsid', cwd: projCwd }));
   fs.writeFileSync(path.join(sb,'config.json'), JSON.stringify({ resume: { enabled:true, in_place:true } }));
   const env = { ...process.env, BRINK_DIR: sb, BRINK_SILENT:'1', BRINK_NO_SCHEDULE:'1', BRINK_DETECT_OVERRIDE: detectOverride };
-  const r = spawnSync('node', [brink,'claude','pause'], { encoding:'utf8', env, input: JSON.stringify({ cwd: projCwd, session_id:'ctxsid' }), timeout: 20000 });
+  const r = spawnSync('node', [brink,'claude','pause'], { encoding:'utf8', env, input: JSON.stringify({ cwd: projCwd, session_id:'ctxsid', transcript_path: projCwd + '/t.jsonl' }), timeout: 20000 });
   return {
     sb,
     ctxPath: paths.ctxPath(sb, projCwd, 'ctxsid'),
@@ -71,6 +71,10 @@ console.log('Case A — injectable target => ctx written:');
     else bad('ctx.continue_prompt missing/empty');
     if (ctx && ctx.proj === a.sb.replace(/\\/g,'/')) ok('ctx.proj === sandbox cwd');
     else bad('ctx.proj wrong: ' + JSON.stringify(ctx && ctx.proj));
+    // Report 2026-07-27 fix 2: the transcript path is what binds the dispatcher's
+    // success verification to THIS session — it must be recorded at pause time.
+    if (ctx && ctx.transcript_path === a.sb.replace(/\\/g,'/') + '/t.jsonl') ok('ctx.transcript_path recorded from the hook payload');
+    else bad('ctx.transcript_path wrong: ' + JSON.stringify(ctx && ctx.transcript_path));
   } else {
     bad('resume-ctx not written for an injectable target');
     console.log('  stdout: ' + a.stdout.slice(0,300));

@@ -59,6 +59,12 @@ function appendHistory(dir, state, now) {
     five_pct: state.five_pct, week_pct: state.week_pct,
     five_reset: state.five_reset, week_reset: state.week_reset,
     sid: state.session_id || '',
+    // Model dimension (report 2026-07-31 defect 1): without it, post-hoc forensics
+    // cannot even see which model burned a window. rl_extra names any rate-limit
+    // buckets beyond five_hour/seven_day the payload carried (the per-model-bucket
+    // probe question) — only present when there were any.
+    model: state.model || '',
+    ...(state.rl_extra && state.rl_extra.length ? { rl_extra: state.rl_extra } : {}),
   }) + '\n';
   try {
     fs.appendFileSync(p, line);

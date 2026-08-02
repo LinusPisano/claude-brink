@@ -123,8 +123,17 @@ console.log('Case A — injectable ctx => in-place inject, no headless fallback:
       if (!fs.existsSync(ctxPath)) ok('resume-ctx file consumed (removed) after dispatch');
       else bad('resume-ctx file left behind after dispatch');
 
-      if (!fs.existsSync(handoffPath)) ok('session handoff (HANDOFF.md) deleted after in-place resume fired');
-      else bad('session handoff (HANDOFF.md) still present after in-place resume fired');
+      // Report 2026-07-27 fix 1: the handoff is the RECOVERY artifact — an in-place
+      // resume (verified or legacy-unverifiable, as here: ctx has no transcript_path)
+      // must never delete it. Only a headless resume that actually consumed it may.
+      if (fs.existsSync(handoffPath)) ok('session handoff (HANDOFF.md) PRESERVED after in-place resume (only headless consumes it)');
+      else bad('session handoff (HANDOFF.md) was deleted on the in-place path - the 2026-07-27 unrecoverable-miss regression');
+
+      // Report 2026-07-27 fix 3: the in-place path must leave a forensic record.
+      const dispLog = path.join(sessionDir, '.claude-resume.log');
+      const dispLogTxt = fs.existsSync(dispLog) ? fs.readFileSync(dispLog, 'utf8') : '';
+      if (/\[dispatch\]/.test(dispLogTxt) && /legacy ctx without transcript_path/.test(dispLogTxt)) ok('in-place path logged to .claude-resume.log (incl. legacy-ctx note)');
+      else bad('in-place path left no dispatch log (got: ' + JSON.stringify(dispLogTxt.slice(0, 200)) + ')');
 
       // The safety-gap fix under test: in-place resumes must increment chain_<sid> just
       // like resume-once.ps1 does for the headless path, or brink.js's max_chain arm-time
@@ -138,6 +147,162 @@ console.log('Case A — injectable ctx => in-place inject, no headless fallback:
     }
   }
   cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// Case D — in-place injection VERIFIED via transcript growth (report 2026-07-27 fix 2)
+// ---------------------------------------------------------------------------
+console.log('Case D — ctx with transcript_path, transcript grows => verified in-place, no fallback:');
+{
+  const token = crypto.randomBytes(8).toString('hex');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispD-'));
+  const flag = path.join(tmp, 'flag.txt');
+  const transcript = path.join(tmp, 'transcript.jsonl');
+  fs.writeFileSync(transcript, '{"seed":true}\n'); // exists before injection, must GROW after
+  const targetPs = path.join(tmp, `target-${token}.ps1`);
+  // The throwaway target plays the paused session: on receiving the injected line it
+  // appends to ITS transcript — exactly the signal a real submit produces.
+  fs.writeFileSync(targetPs,
+    `$x=[Console]::ReadLine(); Set-Content -Path '${flag.replace(/\\/g, '\\\\')}' -Value "GOT:$x"; Add-Content -Path '${transcript.replace(/\\/g, '\\\\')}' -Value '{"role":"user"}'`);
+
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispD-shim-'));
+  const sentinel = path.join(shimDir, 'sentinel.txt');
+  fs.writeFileSync(path.join(shimDir, 'claude.cmd'), `@echo off\r\necho SENTINEL>"${sentinel}"\r\nexit /b 0\r\n`);
+
+  let pid = 0;
+  spawn('cmd', ['/c', 'start', '/min', '', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', targetPs], { windowsHide: false });
+  spawnSync('powershell', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2']);
+  const find = spawnSync('powershell', ['-NoProfile', '-Command',
+    `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*target-${token}.ps1*' } | Select-Object -First 1 -ExpandProperty ProcessId`],
+    { encoding: 'utf8' });
+  pid = parseInt((find.stdout || '').trim(), 10) || 0;
+
+  if (!pid) {
+    bad('could not find throwaway target pid (Case D)');
+  } else {
+    const startTime = psQuery(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToString('o')`);
+    if (!startTime) {
+      bad('could not read throwaway target CreationDate (Case D)');
+    } else {
+      const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispD-ctx-'));
+      const ctxPath = path.join(ctxDir, 'resume-ctx.json');
+      fs.writeFileSync(ctxPath, JSON.stringify({
+        SessionPid: pid, SessionStartTime: startTime, Terminal: 'Conhost',
+        Injectable: true, InjectionMethod: 'AttachConsole_WriteConsoleInput',
+        sid: 'dispatchD', proj: ctxDir, continue_prompt: 'continue', transcript_path: transcript,
+      }));
+      const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispD-sdir-'));
+      const handoffPath = path.join(sessionDir, 'HANDOFF.md');
+      fs.writeFileSync(handoffPath, '# HANDOFF - paused by Brink\nplaceholder for dispatch Case D');
+
+      const env = {
+        ...process.env,
+        PATH: shimDir + path.delimiter + (process.env.PATH || ''),
+        Path: shimDir + path.delimiter + (process.env.Path || process.env.PATH || ''),
+        BRINK_SILENT: '1',
+        BRINK_DIR: ctxDir,
+        BRINK_DISPATCH_VERIFY_SECS: '15',
+        BRINK_DISPATCH_DETECT_OVERRIDE: JSON.stringify({ HasWinConsole: true, Terminal: 'Conhost', Confidence: 'High' }),
+      };
+      const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', dispatchPs,
+        '-Sid', 'dispatchD', '-Proj', ctxDir, '-CtxPath', ctxPath, '-SessionDir', sessionDir], { encoding: 'utf8', env, timeout: 60000 });
+
+      if (!fs.existsSync(sentinel)) ok('verified in-place: headless shim NOT invoked');
+      else bad('headless shim invoked despite transcript growth - verification failed to detect the advance');
+      if (!fs.existsSync(ctxPath)) ok('resume-ctx consumed after verified in-place');
+      else bad('resume-ctx left behind after verified in-place');
+      if (fs.existsSync(handoffPath)) ok('handoff PRESERVED after verified in-place');
+      else bad('handoff deleted after verified in-place');
+      const logTxt = fs.existsSync(path.join(sessionDir, '.claude-resume.log')) ? fs.readFileSync(path.join(sessionDir, '.claude-resume.log'), 'utf8') : '';
+      if (/VERIFIED: transcript grew/.test(logTxt)) ok('dispatch log records transcript verification');
+      else bad('dispatch log missing VERIFIED line (got: ' + JSON.stringify(logTxt.slice(0, 300)) + '; stdout: ' + (r.stdout || '').slice(0, 200) + ')');
+
+      try { fs.rmSync(ctxDir, { recursive: true, force: true }); } catch {}
+      try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+  try { if (pid) spawnSync('powershell', ['-NoProfile', '-Command', `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`]); } catch {}
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(shimDir, { recursive: true, force: true }); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Case E — injection lands but transcript does NOT grow => headless fallback
+// (the 2026-07-27 wrong-window scenario: write-success is not session-success)
+// ---------------------------------------------------------------------------
+console.log('Case E — ctx with transcript_path, transcript static => falls back to headless:');
+{
+  const token = crypto.randomBytes(8).toString('hex');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispE-'));
+  const flag = path.join(tmp, 'flag.txt');
+  const transcript = path.join(tmp, 'transcript.jsonl');
+  fs.writeFileSync(transcript, '{"seed":true}\n'); // never grows: the "wrong window" got the keystrokes
+  const targetPs = path.join(tmp, `target-${token}.ps1`);
+  fs.writeFileSync(targetPs, `$x=[Console]::ReadLine(); Set-Content -Path '${flag.replace(/\\/g, '\\\\')}' -Value "GOT:$x"`);
+
+  const projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispE-proj-'));
+  const absExeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispE-absexe-'));
+  const absClaudeExe = path.join(absExeDir, 'claude.cmd');
+  const absSentinel = path.join(absExeDir, 'sentinel.txt');
+  fs.writeFileSync(absClaudeExe, `@echo off\r\necho ABS_SENTINEL>"${absSentinel}"\r\nexit /b 0\r\n`);
+
+  let pid = 0;
+  spawn('cmd', ['/c', 'start', '/min', '', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', targetPs], { windowsHide: false });
+  spawnSync('powershell', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2']);
+  const find = spawnSync('powershell', ['-NoProfile', '-Command',
+    `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*target-${token}.ps1*' } | Select-Object -First 1 -ExpandProperty ProcessId`],
+    { encoding: 'utf8' });
+  pid = parseInt((find.stdout || '').trim(), 10) || 0;
+
+  if (!pid) {
+    bad('could not find throwaway target pid (Case E)');
+  } else {
+    const startTime = psQuery(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToString('o')`);
+    if (!startTime) {
+      bad('could not read throwaway target CreationDate (Case E)');
+    } else {
+      const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispE-ctx-'));
+      const ctxPath = path.join(ctxDir, 'resume-ctx.json');
+      fs.writeFileSync(ctxPath, JSON.stringify({
+        SessionPid: pid, SessionStartTime: startTime, Terminal: 'Conhost',
+        Injectable: true, InjectionMethod: 'AttachConsole_WriteConsoleInput',
+        sid: 'dispatchE', proj: projDir, continue_prompt: 'continue', transcript_path: transcript,
+      }));
+      const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispE-sdir-'));
+      const handoffPath = path.join(sessionDir, 'HANDOFF.md');
+      fs.writeFileSync(handoffPath, '# HANDOFF - paused by Brink\nplaceholder for dispatch Case E');
+
+      const env = {
+        ...process.env,
+        BRINK_SILENT: '1',
+        BRINK_DIR: ctxDir,            // fresh, no state.json => weekly precheck skips
+        BRINK_NO_SCHEDULE: '1',
+        BRINK_DISPATCH_VERIFY_SECS: '6',
+        BRINK_DISPATCH_DETECT_OVERRIDE: JSON.stringify({ HasWinConsole: true, Terminal: 'Conhost', Confidence: 'High' }),
+      };
+      const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', dispatchPs,
+        '-Sid', 'dispatchE', '-Proj', projDir, '-CtxPath', ctxPath, '-SessionDir', sessionDir,
+        '-ClaudeExe', absClaudeExe], { encoding: 'utf8', env, timeout: 90000 });
+
+      if (fs.existsSync(absSentinel)) ok('unverified injection fell back to headless resume');
+      else bad('headless fallback did NOT fire after unverified injection (stdout: ' + (r.stdout || '').slice(0, 300) + '; stderr: ' + (r.stderr || '').slice(0, 300) + ')');
+      const logTxt = fs.existsSync(path.join(sessionDir, '.claude-resume.log')) ? fs.readFileSync(path.join(sessionDir, '.claude-resume.log'), 'utf8') : '';
+      if (/NOT verified: transcript unchanged/.test(logTxt)) ok('dispatch log records the failed verification');
+      else bad('dispatch log missing NOT-verified line (got: ' + JSON.stringify(logTxt.slice(0, 300)) + ')');
+      // Headless path genuinely ran (stub exit 0) => pause resolved => both consumed.
+      if (!fs.existsSync(ctxPath)) ok('resume-ctx consumed after headless fallback resolved the pause');
+      else bad('resume-ctx left behind after headless fallback');
+      if (!fs.existsSync(handoffPath)) ok('handoff consumed by the headless resume (the one path allowed to delete it)');
+      else bad('handoff still present after a real headless resume consumed it');
+
+      try { fs.rmSync(ctxDir, { recursive: true, force: true }); } catch {}
+      try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+  try { if (pid) spawnSync('powershell', ['-NoProfile', '-Command', `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`]); } catch {}
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(projDir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(absExeDir, { recursive: true, force: true }); } catch {}
 }
 
 // ---------------------------------------------------------------------------

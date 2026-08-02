@@ -60,6 +60,31 @@ function init() {
   console.log('Verify anytime:  brink doctor    Kill switch:  brink off');
 }
 
+// ---- per-session release hatch (report 2026-07-31 defect 2) ----
+// `brink off` disarms EVERY session on the machine — for a weekly pause with a
+// multi-day horizon that's the difference between a surgical override and dropping
+// the whole safety net for the weekend. `brink release <sid>` lifts enforcement for
+// ONE session (brink.js checks released_<sid> on the pause path); the flag dies with
+// the normal 14-day flag GC, or immediately via --undo.
+function release() {
+  const sid = argv[1];
+  if (!sid || typeof sid !== 'string' || sid.startsWith('--')) {
+    console.error('usage: brink release <session-id> [--undo]');
+    console.error('The session id is shown in the pause message ("brink release <sid>").');
+    process.exit(1);
+  }
+  const flag = path.join(DIR, 'released_' + paths.sanitizeSid(sid));
+  if (argv.includes('--undo')) {
+    try { fs.unlinkSync(flag); console.log(`Session ${sid} is protected by Brink again.`); }
+    catch { console.log(`Session ${sid} was not released (no release flag found).`); }
+    return;
+  }
+  fs.mkdirSync(DIR, { recursive: true });
+  fs.writeFileSync(flag, 'created by `brink release` ' + new Date().toISOString() + '\n');
+  console.log(`Session ${sid} RELEASED - Brink will not pause it (all other sessions stay protected).`);
+  console.log(`Undo:  brink release ${sid} --undo`);
+}
+
 // ---- kill switch ----
 function off() {
   fs.mkdirSync(DIR, { recursive: true });
@@ -375,6 +400,7 @@ function help() {
   brink init [--no-statusline] [--settings <path>]   install hooks + sensor
   brink doctor [--no-toast]                          verify the whole chain end-to-end
   brink off | on                                     kill switch (instant disable/enable)
+  brink release <session-id> [--undo]                lift the pause for ONE session only
   brink uninstall [--purge]                          remove cleanly (restores your statusline)
   brink handoff                                      print the newest paused session's HANDOFF.md
   brink watchdog on [--mode auto|ask] | off | status revive-after-kill daemon (win32)
@@ -383,4 +409,4 @@ function help() {
   brink version`);
 }
 
-({ init, off, on, uninstall, doctor, handoff, watchdog, revive, cancel, version: () => console.log(version()), '--version': () => console.log(version()), help }[cmd] || (() => { console.error(`unknown command: ${cmd}`); help(); process.exit(1); }))();
+({ init, off, on, release, uninstall, doctor, handoff, watchdog, revive, cancel, version: () => console.log(version()), '--version': () => console.log(version()), help }[cmd] || (() => { console.error(`unknown command: ${cmd}`); help(); process.exit(1); }))();

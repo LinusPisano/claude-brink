@@ -59,6 +59,14 @@ process.stdin.on('end', () => {
   const weekReset = num(week.resets_at);
   const sid = j.session_id || '';
   const cwd = (j.workspace && j.workspace.current_dir) || j.cwd || '';
+  // Model dimension (report 2026-07-31 defect 1): the payload carries the session's
+  // model right next to rate_limits, but the pause decision used a usage number with
+  // no model attached — so a weekly pause could not even be forensically checked
+  // against WHICH model burned the window. Recorded in state + history; any extra
+  // rate-limit buckets beyond the two we read are named too (the probe question:
+  // does the payload carry per-model buckets?).
+  const model = (j.model && (j.model.id || j.model.display_name)) || '';
+  const rlExtra = Object.keys(rl).filter((k) => k !== 'five_hour' && k !== 'seven_day');
 
   // --- render (minimal; merge into your full status line) ---
   let rate = '';
@@ -79,7 +87,8 @@ process.stdin.on('end', () => {
   const state = {
     five_pct: fivePct, week_pct: weekPct,
     five_reset: fiveReset, week_reset: weekReset,
-    session_id: sid, cwd,
+    session_id: sid, cwd, model,
+    ...(rlExtra.length ? { rl_extra: rlExtra } : {}),
   };
   let events = [];
   try {

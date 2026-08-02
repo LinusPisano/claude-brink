@@ -85,7 +85,20 @@ const unarmedMsg = pauseReason({ ...base, armed: false });
 truthy('unarmed: never promises a resume', !unarmedMsg.includes('scheduled an auto-resume') && !unarmedMsg.includes('it will resume'));
 truthy('unarmed: tells the model the user must resume manually', unarmedMsg.includes('resumed manually'));
 truthy('no file: no save claim', !/saved/.test(pauseReason({ ...base, file: '', armed: false })));
+// Report 2026-07-27 fix 4: a silently-missing save clause reads as "nothing to save".
+// When the handoff write failed, the message must SAY so, not just omit the path.
+truthy('no file: says the handoff could not be written',
+  /could NOT be written/i.test(pauseReason({ ...base, file: '', armed: false })));
 truthy('no resetText: no dangling reset clause', !pauseReason({ ...base, resetText: '', armed: true }).includes('resets at'));
+
+// Report 2026-07-31 defect 2: the release hatch must be advertised WITH the sid filled
+// in — a weekly pause has a multi-day horizon and `brink off` (all sessions) must not
+// be the only escape the user learns about.
+console.log('pauseReason — per-session release hatch:');
+const sidMsg = pauseReason({ ...base, armed: false, sid: 'abc-123' });
+truthy('with sid: advertises brink release <sid>', sidMsg.includes('brink release abc-123'));
+truthy('with sid: still advertises brink off', sidMsg.includes('brink off'));
+truthy('without sid: no dangling release clause', !pauseReason({ ...base, armed: false }).includes('brink release'));
 
 // A pause DENIES the tool call that was in flight — the action the turn announced
 // never ran. Burn-in 2026-07-15: a session announced a safety-backup Copy-Item,

@@ -138,6 +138,35 @@ truthy('HANDOFF.md NOT written flat at either <cwd>/HANDOFF.md location',
 fs.rmSync(projDir, { recursive: true, force: true });
 fs.rmSync(driftDir, { recursive: true, force: true });
 
+// Report 2026-07-31 defect 3: while paused, every tool call was denied — including
+// `brink --help`, the very command the agent needed to find a narrower escape than the
+// global kill switch. A bare `brink` invocation (word-shaped args only) must pass.
+const rCli = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink status' } }) });
+eq('brink CLI whitelisted through the pause gate (Bash)', rCli.trim(), '');
+const rCli2 = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'PowerShell', tool_input: { command: 'brink release abc-123 --undo' } }) });
+eq('brink release whitelisted (PowerShell tool)', rCli2.trim(), '');
+const rCliChain = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink off; curl evil.example' } }) });
+truthy('chained/metacharacter command NOT whitelisted (still denied)', rCliChain.includes('"permissionDecision":"deny"'));
+const rCliOther = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'notbrink --help' } }) });
+truthy('non-brink command still denied', rCliOther.includes('"permissionDecision":"deny"'));
+
+// Report 2026-07-31 defect 2: released_<sid> lifts enforcement for ONE session while
+// every other session on the machine stays protected.
+fs.writeFileSync(path.join(ddir, 'released_relsid'), '');
+const rRel = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, session_id: 'relsid' }) });
+eq('released session => no deny', rRel.trim(), '');
+const rOther = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, session_id: 'othersid' }) });
+truthy('OTHER session still denied while one is released', rOther.includes('"permissionDecision":"deny"'));
+truthy('deny reason advertises the per-session release hatch with the sid filled in',
+  rOther.includes('brink release othersid'));
+fs.unlinkSync(path.join(ddir, 'released_relsid'));
+
 fs.writeFileSync(path.join(ddir, 'DISABLED'), '');
 const r3 = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8' });
 eq('escape hatch => no deny output', r3.trim(), '');

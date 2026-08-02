@@ -86,16 +86,19 @@ function armArgs(cfg, ctx) {
 // that never fired (burn-in finding 2026-07-05). Same principle as the save line:
 // never claim an action that did not happen. Tool-neutral wording — this reason
 // is shared by the claude and codex adapters.
-function pauseReason({ pct, window, resetText, file, armed, projected }) {
+function pauseReason({ pct, window, resetText, file, armed, projected, sid }) {
   // A pause DENIES the tool call that was in flight, so whatever this turn announced
   // it was doing never actually ran. Saying only "your progress is saved" invites the
   // model — and the user reading it — to treat the announced action as done. Burn-in
   // 2026-07-15: a safety-backup copy was announced, denied, and a later session almost
   // deleted a cloud remote trusting a backup that did not exist.
   const denied = `The tool call that was in flight was denied and did NOT run — nothing this turn said it was doing has taken effect. Re-verify any such action before relying on it. `;
+  // Never claim a save that did not happen (review finding) — and never stay SILENT
+  // about it either (report 2026-07-27 fix 4): a missing save clause reads as "nothing
+  // to save", when the truth is the recovery artifact failed to write.
   const saved = file
     ? `Your notes and next steps (not your pending actions) are saved to ${file}. `
-    : ''; // never claim a save that did not happen (review finding)
+    : `A handoff file could NOT be written — include a short summary of where the task stands in your reply, it is the only record. `;
   const tail = armed
     ? `Brink has scheduled an auto-resume${file ? ' from the handoff' : ''} shortly after the reset`
     : `auto-resume is NOT armed — tell the user this session must be resumed manually after the reset`;
@@ -104,10 +107,14 @@ function pauseReason({ pct, window, resetText, file, armed, projected }) {
   const head = projected
     ? `Paused by Brink (pre-emptive): you are at ${Math.round(pct)}% of your ${window} usage limit and burning ~${projected.rate_per_min}%/min — projected past the ${projected.threshold}% pause threshold within ${projected.lookahead_min} min`
     : `Paused by Brink: you are at ${Math.round(pct)}% of your ${window} usage limit`;
+  // The release hatch is advertised WITH the sid filled in: a weekly pause has a
+  // multi-day horizon, and without this line the only escape the user learns about
+  // is the global kill switch (report 2026-07-31 defect 2).
+  const release = sid ? `, or lift the pause for JUST this session with \`brink release ${sid}\`` : '';
   return head +
     `${resetText ? `, which resets at ${resetText}` : ''}. ${denied}${saved}` +
     `Stop here and reply to the user in plain text — do not start new work; ${tail}. ` +
-    `Tell the user: any prompts they send now won't be queued yet (that's coming) — and they can disable Brink at any time with \`brink off\`.`;
+    `Tell the user: any prompts they send now won't be queued yet (that's coming) — and they can disable Brink for all sessions with \`brink off\`${release}.`;
 }
 
 module.exports = { resumeCfg, shouldArm, armArgs, chainAllowed, pauseReason, DEFAULT_RESUME, DEFAULT_CONTINUE };
