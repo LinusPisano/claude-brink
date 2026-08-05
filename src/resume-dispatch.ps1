@@ -133,17 +133,28 @@ if ($CtxPath -and (Test-Path -LiteralPath $CtxPath)) {
 $resolved = $didInPlace
 if (-not $didInPlace) {
   Log 'headless fallback: invoking resume-once.ps1'
-  # Defensively quote the string params: this spawns powershell.exe as a native child
-  # process, and PS 5.1's native-arg passing can drop/split bare (unquoted) variables -
-  # most notably an empty string silently vanishing instead of arriving as "" - which
-  # would shift every argument after it. Wrapping each in "$var" pins it as one token
-  # even when empty (-ClaudeExe '') or when it contains spaces (a homedir path).
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'resume-once.ps1') -Sid $Sid -Proj "$Proj" -Buffer $Buffer -Skip $Skip -SessionDir "$SessionDir" -ClaudeExe "$ClaudeExe"
+  # Code review 2026-08-05 finding 2: PS 5.1's native-arg passing DROPS an empty string
+  # when spawning a child process - "$ClaudeExe" does NOT pin it as "", it vanishes,
+  # shifting every following named argument and making resume-once.ps1 fail parameter
+  # binding before its own body (which already has an empty-ClaudeExe fallback to a bare
+  # `claude` PATH lookup, resume-once.ps1:95-101) ever ran. An empty -ClaudeExe/-SessionDir
+  # is the DESIGNED normal case (arm-resume.ps1 writes -ClaudeExe "" whenever claude-exe.js
+  # never resolved a path), not an edge case. Build the argument list as an array (splat)
+  # and OMIT an empty switch entirely instead of passing it as "" - that sidesteps the
+  # native-boundary drop altogether; both params already default to '' in resume-once.ps1.
+  $onceArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $here 'resume-once.ps1'),
+    '-Sid', $Sid, '-Proj', $Proj, '-Buffer', $Buffer, '-Skip', $Skip)
+  if ($SessionDir) { $onceArgs += @('-SessionDir', $SessionDir) }
+  if ($ClaudeExe)  { $onceArgs += @('-ClaudeExe', $ClaudeExe) }
+  $launchFailed = $false
+  try { & powershell @onceArgs } catch { $launchFailed = $true; Log "headless fallback failed to launch: $($_.Exception.Message)" }
   # Sentinel exit code 42 (see resume-once.ps1): the headless fallback hit its weekly-cap
   # precheck and RE-ARMED for a later reset instead of actually resuming - the pause is
-  # NOT resolved in that case. Any other exit code means resume-once.ps1 actually attempted
-  # the resume (whatever claude itself returned), so the pause IS resolved.
-  $resolved = ($LASTEXITCODE -ne 42)
+  # NOT resolved in that case. A launch failure (the child process never ran at all, e.g.
+  # powershell.exe itself could not be started) is also NOT resolved - only a code
+  # resume-once.ps1 itself returned (0, or whatever claude exited with) means it actually
+  # attempted the resume.
+  $resolved = (-not $launchFailed) -and ($LASTEXITCODE -ne 42)
   Log "headless fallback exit=$LASTEXITCODE (42 = re-armed for a later reset, pause not resolved)"
 }
 

@@ -467,4 +467,78 @@ console.log('Case C — headless fallback re-arms for weekly reset => handoff + 
   try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// Case F — headless fallback with an EMPTY -ClaudeExe (code review 2026-08-05, finding 2):
+// PS 5.1's native-arg passing drops an unquoted-then-dropped empty string across the
+// powershell.exe child-process boundary, so resume-once.ps1 used to fail parameter
+// binding before its own script body (which already has a documented empty-ClaudeExe
+// fallback to a bare `claude` PATH lookup, resume-once.ps1:95-101) ever ran. Regression
+// signal: the PATH-lookup stub being invoked at all, and chain_<sid> being written — both
+// only happen from INSIDE resume-once.ps1's own body. (.claude-resume.log is NOT a valid
+// signal here: resume-dispatch.ps1 itself writes to that file before ever spawning the
+// child, so it exists either way.) Under the bug, PowerShell's own "Missing an argument for
+// parameter 'ClaudeExe'" killed the child before its body ran, yet resume-dispatch.ps1 still
+// read the child's exit code as "resolved" and deleted resume-ctx.json + HANDOFF.md —
+// silently losing the recovery artifact for a resume that never happened.
+// ---------------------------------------------------------------------------
+console.log('Case F — empty -ClaudeExe => headless fallback still binds params and runs (does not lose the handoff):');
+{
+  const projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispF-proj-'));
+  const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispF-ctx-'));
+  const brinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispF-dir-'));
+  // Now the ONLY way claude gets invoked, since -ClaudeExe is empty and resume-once.ps1
+  // must fall back to a bare `claude` PATH lookup (resume-once.ps1:95-101).
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispF-shim-'));
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispF-sdir-'));
+  const handoffPath = path.join(sessionDir, 'HANDOFF.md');
+  fs.writeFileSync(handoffPath, '# HANDOFF - paused by Brink\nplaceholder for dispatch Case F');
+
+  const pathSentinel = path.join(shimDir, 'sentinel.txt');
+  fs.writeFileSync(path.join(shimDir, 'claude.cmd'), `@echo off\r\necho PATH_SENTINEL>"${pathSentinel}"\r\nexit /b 0\r\n`);
+
+  const ctxPath = path.join(ctxDir, 'resume-ctx.json');
+  // Same PID-reuse trick as Case B: pid 4 ("System") can never match this fabricated
+  // SessionStartTime, so the PID-reuse guard fails closed and routes to headless.
+  const ctx = {
+    SessionPid: 4, SessionStartTime: '1999-01-01T00:00:00.000Z', Terminal: 'Conhost',
+    Injectable: true, InjectionMethod: 'AttachConsole_WriteConsoleInput',
+    sid: 'dispatchF', proj: projDir, continue_prompt: 'continue',
+  };
+  fs.writeFileSync(ctxPath, JSON.stringify(ctx));
+
+  const env = {
+    ...process.env,
+    PATH: shimDir + path.delimiter + (process.env.PATH || ''),
+    Path: shimDir + path.delimiter + (process.env.Path || process.env.PATH || ''),
+    BRINK_SILENT: '1',
+    BRINK_DIR: brinkDir,          // fresh, no state.json => resume-once's weekly precheck skips
+    BRINK_NO_SCHEDULE: '1',
+  };
+  // Deliberately NO -ClaudeExe flag at all — resume-dispatch.ps1's own param default ('')
+  // is exactly the value arm-resume.ps1 writes when claude-exe.js never resolved a path.
+  const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', dispatchPs,
+    '-Sid', 'dispatchF', '-Proj', projDir, '-CtxPath', ctxPath, '-SessionDir', sessionDir],
+    { encoding: 'utf8', env, timeout: 30000 });
+
+  if (fs.existsSync(pathSentinel)) ok('bare `claude` PATH lookup was invoked (resume-once.ps1 started and reached its own empty-ClaudeExe fallback)');
+  else bad('bare `claude` PATH-lookup stub was NOT invoked — resume-once.ps1 did not reach its own fallback branch');
+
+  if (!fs.existsSync(ctxPath)) ok('resume-ctx.json consumed (pause genuinely resolved)');
+  else bad('resume-ctx.json still present — dispatcher did not resolve the pause');
+
+  if (!fs.existsSync(handoffPath)) ok('HANDOFF.md consumed by a headless resume that actually ran');
+  else bad('HANDOFF.md still present — dispatcher treated the pause as unresolved');
+
+  const chainPathF = path.join(brinkDir, 'chain_dispatchF');
+  const chainSeenF = fs.existsSync(chainPathF) ? fs.readFileSync(chainPathF, 'utf8').trim() : null;
+  if (chainSeenF === '1') ok('chain_<sid> incremented by resume-once.ps1 (its own body ran, not just the dispatcher)');
+  else bad('chain_<sid> unexpected (expected "1", got: ' + JSON.stringify(chainSeenF) + ') — resume-once.ps1 likely never reached its own logic');
+
+  try { fs.rmSync(projDir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(ctxDir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(brinkDir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(shimDir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+}
+
 console.log(''); process.exit(fail ? 1 : 0);

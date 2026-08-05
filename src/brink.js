@@ -340,7 +340,7 @@ async function main() {
     try {
       const toolCmd = String((hook.tool_input && hook.tool_input.command) || '');
       const shellTool = hook.tool_name === 'Bash' || hook.tool_name === 'PowerShell';
-      if (shellTool && /^\s*brink(\.cmd)?(\s+[\w.:\\/-]+)*\s*$/.test(toolCmd)) process.exit(0);
+      if (shellTool && /^[ \t]*brink(\.cmd)?([ \t]+[\w.:\\/-]+)*[ \t]*$/.test(toolCmd)) process.exit(0);
     } catch { /* whitelist is best-effort; fall through to the normal deny */ }
 
     // Prefer the hook's own session_id — the shared state.json may hold another

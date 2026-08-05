@@ -153,6 +153,9 @@ truthy('chained/metacharacter command NOT whitelisted (still denied)', rCliChain
 const rCliOther = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
   input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'notbrink --help' } }) });
 truthy('non-brink command still denied', rCliOther.includes('"permissionDecision":"deny"'));
+const rCliNewline = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink status\nnpm run deploy' } }) });
+truthy('newline-smuggled command NOT whitelisted (still denied)', rCliNewline.includes('"permissionDecision":"deny"'));
 
 // Report 2026-07-31 defect 2: released_<sid> lifts enforcement for ONE session while
 // every other session on the machine stays protected.
