@@ -4,7 +4,7 @@
 
 Brink pauses Claude Code gracefully at your usage limit, writes a handoff of exactly what was in flight, and — on Windows — resumes your live session in place the moment your quota resets. Elsewhere, you get the pause and the handoff; you resume by hand.
 
-[![version](https://img.shields.io/badge/version-1.1.0-blue)](#status) [![platform](https://img.shields.io/badge/Claude%20Code-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#support-matrix) [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
+[![tests](https://github.com/LinusPisano/claude-brink/actions/workflows/test.yml/badge.svg)](https://github.com/LinusPisano/claude-brink/actions/workflows/test.yml) [![version](https://img.shields.io/badge/version-1.1.0-blue)](#status) [![platform](https://img.shields.io/badge/Claude%20Code-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#support-matrix) [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 <!-- DEMO GIF GOES HERE — replace with docs/demo.gif (captured separately: a real pause -> reset -> in-place resume cycle) -->
 <p align="center"><em>[ demo.gif — Brink pausing at the limit, then nudging the same session back to life on reset ]</em></p>
@@ -40,7 +40,9 @@ Brink v1 supports **Claude Code**. Here's exactly what you get and where:
 
 In-place resume is the headline feature, but it depends on being able to write keystrokes into your terminal's console buffer — that only works in Windows Terminal and classic conhost today. Everywhere else on Windows, Brink automatically falls back to relaunching `claude --resume` headlessly, so a reset is never a no-op. `brink doctor` confirms whether Brink can classify your current terminal at all, and warns if it can't — a warning means in-place will fall back to headless.
 
-> **macOS / Linux:** the pause + handoff + notifier logic is plain, cross-platform Node, but it has **not yet been tested on real macOS/Linux hardware** — that's the next verification gate. If you run it there, `brink doctor` output in an issue is gold.
+> **macOS / Linux:** the pause + handoff + notifier logic is plain, cross-platform Node. Since 2026-08-05 the test suite **runs on real macOS and Linux runners on every push** ([CI](https://github.com/LinusPisano/claude-brink/actions/workflows/test.yml)), so the cross-platform core — threshold and burn-rate maths, reset handling, handoff writing, `settings.json` install/uninstall, path handling, and the notifier's command construction and stderr fallback — is now continuously verified there rather than assumed.
+>
+> Two gaps remain, and they are the honest ones: the Windows-only suites self-skip on those runners (nothing to verify — that code is `.ps1`), and CI cannot prove the **end-to-end** story. Nobody has yet run Brink on a macOS or Linux desktop against a live Claude Code install and watched a real pause fire, or confirmed that `osascript` / `notify-send` actually surface a visible notification — the tests assert the command Brink *builds*, not that the desktop displays it. If you run it there, `brink doctor` output in an issue is still gold.
 
 ## Config
 
