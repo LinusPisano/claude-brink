@@ -1,0 +1,73 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first — no point burning runners on a
+# commit that is already superseded.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The gate. Windows is Brink's primary platform: the pause, handoff, resume-arming,
+  # terminal detection and watchdog logic all live here.
+  windows:
+    name: windows / node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '22'] # 18 = the floor declared in package.json engines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # No install step on purpose: Brink has zero runtime and dev dependencies, and
+      # ships no lockfile, so `npm ci` would fail and `npm install` would be a no-op.
+      - name: Run deterministic suites
+        run: node tests/ci.js
+
+  # Brink's README states the pause/handoff/notifier path is plain cross-platform Node but
+  # has not been verified on real macOS/Linux hardware. This job is that verification gate.
+  # The win32-only suites self-skip (they exit 0 with a "skip:" line), so what actually runs
+  # here is the platform-independent core.
+  unix:
+    name: ${{ matrix.os }} / node 22
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run deterministic suites
+        run: node tests/ci.js
+
+  # Advisory, NOT a gate. These suites spawn real console windows and write keystrokes into
+  # them via AttachConsole/WriteConsoleInput. They pass reliably on an interactive Windows
+  # desktop, but they are timing-dependent (fixed sleeps while waiting for a spawned console
+  # to appear) and depend on a real console host, so a hosted runner can fail them for
+  # reasons that have nothing to do with the code. Kept visible so a genuine break is still
+  # noticed; kept non-blocking so a runner hiccup never red-flags an otherwise good push.
+  console-injection:
+    name: windows / console-injection (advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run console-spawning suites
+        run: node tests/ci.js console
