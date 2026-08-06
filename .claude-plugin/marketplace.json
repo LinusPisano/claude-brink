@@ -10,7 +10,7 @@
       "name": "brink",
       "source": "./",
       "description": "Claude Code stops at the brink — gracefully auto-pauses your agent before a usage limit (writes HANDOFF.md + stops), notifies you with a desktop notification, and optionally resumes after the window resets.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": {
         "name": "Linus Pisano",
         "email": "pisanolinus@gmail.com"
