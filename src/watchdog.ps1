@@ -115,9 +115,43 @@ function Test-SessionAlive($ProcId, $StartIso) {
 
 # Revive a dead session from its marker. Returns $true on a clean claude exit.
 # NEVER silent (the 2026-07-06 no-show lesson): every outcome toasts + logs.
-function Invoke-Revive($m, $markerFile, $c) {
+# Append one line to a session's revive log: UTF-8, handle closed between writes so the
+# log stays readable DURING a revive and survives a kill. See Write-LogLine in
+# resume-once.ps1 for the full rationale. -LiteralPath so a project path containing
+# [ or ] cannot silently swallow the log.
+function Write-ReviveLog($path, $text) {
+  try { Add-Content -LiteralPath $path -Value $text -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+}
+
+# $Explicit = the user asked for this revive by name (`brink revive`), rather than the
+# daemon deciding on its own. Explicit intent skips the advisory gates, matching the rule
+# the -Revive branch already applies to the hold/cap gates.
+function Invoke-Revive($m, $markerFile, $c, [switch]$Explicit) {
   $sid = [string]$m.sid
   $proj = [string]$m.proj
+  # ---- per-session release gate (code review 2026-08-05, finding 3) ----
+  # The daemon loop already honours the global DISABLED kill switch, but `brink release
+  # <sid>` was checked ONLY on brink.js's pause path — so a session the user explicitly
+  # released stayed fully exposed to the watchdog, which would happily relaunch it
+  # headlessly (with --dangerously-skip-permissions if configured).
+  #
+  # Post-fix review 2026-08-06: the first version of this gate had two bugs, both fixed here.
+  #   1. It ran on the MANUAL path too, so `brink revive <sid>` — an explicit, deliberate
+  #      user action — was refused with a generic "Revive FAILED" pointing at a log that
+  #      had no entry for the attempt. `-Explicit` now bypasses the gate: release protects
+  #      you from the DAEMON acting on its own, it is not a lock against your own hands.
+  #   2. It deleted the busy marker, the only artifact that makes a dead session findable
+  #      (Get-DeadMarkers enumerates busy_*.json). That made the release irreversible in
+  #      practice: even `brink release <sid> --undo` could not bring the session back, and
+  #      the toast saying otherwise was false. The marker is now KEPT — the same
+  #      preserve-the-recovery-artifact contract resume-dispatch.ps1 follows and
+  #      tests/dispatch.test.js asserts. NotifyOnce (not Notify) prevents the toast storm
+  #      that deleting the marker was silently buying.
+  if (-not $Explicit -and (Test-Path -LiteralPath (Join-Path $brinkDir ('released_' + ($sid -replace '[^\w.-]', '_'))))) {
+    Log "revive $sid skipped - session released via ``brink release $sid`` (marker kept; --undo restores it)"
+    NotifyOnce "released_$sid" "Brink watchdog: not reviving $sid - it is released. Undo with: brink release $sid --undo"
+    return $false
+  }
   # chain accounting BEFORE launching (resume-once.ps1 pattern: a crash mid-revive
   # still counts), and the marker dies BEFORE launching so a wedged/crashed launch
   # can never re-fire on every poll cycle.
@@ -147,21 +181,31 @@ function Invoke-Revive($m, $markerFile, $c) {
   $cargs = @('--resume', $sid, '-p', $c.revive_prompt)
   if ($c.skip_permissions) { $cargs += '--dangerously-skip-permissions' }
   Log "reviving $sid in $proj (chain now $($n + 1))"
+  # Open the revive log with a launch record BEFORE invoking claude. Two reasons: the
+  # old `*>> $rlog` redirect created this file even when claude printed nothing, whereas
+  # `*>&1 | Add-Content` does not run at all on empty output — so without this line a
+  # silent revive would leave NO log, which is precisely the blind spot this file exists
+  # to close. It also timestamps the attempt itself, not just claude's output.
+  "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [watchdog] reviving $sid in $proj (chain $($n + 1))" |
+    Add-Content -Path $rlog -Encoding UTF8
   $code = -1
   Push-Location -LiteralPath $proj   # `claude --resume` is project-scoped (2026-07-06 finding)
   try {
     if ($m.claude_exe -and (Test-Path -LiteralPath $m.claude_exe)) {
-      & $m.claude_exe @cargs *>> $rlog
+      # Same UTF-8 + per-line streaming contract as resume-once.ps1 (see Write-LogLine
+      # there): one Add-Content for the whole run would hold an exclusive lock on this log
+      # for the entire revive and lose everything if it is killed.
+      & $m.claude_exe @cargs *>&1 | ForEach-Object { Write-ReviveLog $rlog $_ }
     } else {
       # Same never-silent degradation contract as resume-once.ps1: the pinned path
       # broke, we still try PATH, but the user gets a signal either way.
       $why = if ($m.claude_exe) { "pinned claude path not found ($($m.claude_exe))" } else { 'no pinned claude path in the marker' }
-      "Brink watchdog: $why - falling back to bare 'claude' PATH lookup" | Add-Content -Path $rlog
+      Write-ReviveLog $rlog "Brink watchdog: $why - falling back to bare 'claude' PATH lookup"
       Notify 'Brink watchdog: pinned claude path missing, trying PATH (revive may fail)'
-      claude @cargs *>> $rlog
+      claude @cargs *>&1 | ForEach-Object { Write-ReviveLog $rlog $_ }
     }
     $code = $LASTEXITCODE
-  } catch { $_ | Out-String | Add-Content -Path $rlog } finally { Pop-Location }
+  } catch { Write-ReviveLog $rlog ($_ | Out-String) } finally { Pop-Location }
 
   if ($code -eq 0) {
     Log "revive $sid finished ok"
@@ -285,7 +329,15 @@ if ($Revive) {
     exit 1
   }
   Write-Output "Reviving session $($pick.sid) in $($pick.proj) ..."
-  $okRun = Invoke-Revive $pick $pickFile $c
+  # -Explicit: you asked for this session by name, so the release gate does not apply.
+  # `brink release` shields a session from the DAEMON's own judgement; it was never meant
+  # to refuse a direct instruction (post-fix review 2026-08-06). Say so, rather than
+  # reviving a released session with no explanation.
+  if (Test-Path -LiteralPath (Join-Path $brinkDir ('released_' + ([string]$pick.sid -replace '[^\w.-]', '_')))) {
+    Write-Output "Note: this session is released (brink release), so the watchdog would not have"
+    Write-Output "      touched it on its own. Reviving anyway because you asked for it by name."
+  }
+  $okRun = Invoke-Revive $pick $pickFile $c -Explicit
   if ($okRun) { Write-Output 'Revive finished - the session continued headless. Check the toast / your project.' ; exit 0 }
   Write-Output 'Revive FAILED - see .claude-watchdog.log in the session dir (brink watchdog status shows it).'
   exit 1

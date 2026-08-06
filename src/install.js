@@ -104,7 +104,12 @@ function main() {
       // Loud, not silent (review finding carried over from the old clobber behavior).
       console.error(`note: wrapping your existing statusLine (original preserved in ${settingsPath}.brink-bak - both will run)`);
       const origB64 = Buffer.from(s.statusLine.command, 'utf8').toString('base64');
-      s.statusLine = { type: 'command', command: cmd('statusline-wrap.js', '--orig-b64', origB64) };
+      // Spread the existing object rather than replacing it: statusLine carries sibling
+      // keys Claude Code honours (padding, refreshInterval, hideVimModeIndicator, ...) and
+      // rebuilding it as a bare {type, command} silently dropped every one of them on the
+      // first init — a formatting change the user never asked for, and one uninstall could
+      // not undo either (post-fix review 2026-08-06). Only `command` is ours to change.
+      s.statusLine = { ...s.statusLine, type: 'command', command: cmd('statusline-wrap.js', '--orig-b64', origB64) };
       changed.push('statusLine(wrapped existing)');
     } else {
       s.statusLine = { type: 'command', command: STATUS };

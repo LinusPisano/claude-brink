@@ -8,7 +8,7 @@
 //      claude.cmd that records its argv (win32 only; the daemon is win32-only in v1)
 // Zero deps. Run: node tests/watchdog.test.js
 
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync, spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -231,6 +231,65 @@ if (os.platform() !== 'win32') {
     eq('C6 capped window: no launch', fs.existsSync(sb.argsFile), false);
     eq('C6 capped window: marker held for after reset', fs.existsSync(busyMarkerPath(sb.tmp, sid)), true);
     fs.rmSync(sb.tmp, { recursive: true, force: true });
+  }
+
+  // C7: `brink release <sid>` stops the DAEMON from reviving that session — but must not
+  // consume the busy marker, or the release becomes irreversible (--undo would have
+  // nothing left to restore) and the session becomes invisible to any later revive.
+  // Code review 2026-08-05 finding 3 (the gate) + post-fix review 2026-08-06 (the marker).
+  {
+    const sb = mkSandbox({ watchdog: { mode: 'auto', cancel_window_seconds: 0 }, resume: { max_chain: 5 } });
+    const sid = 'wd-released-1';
+    sb.writeMarker(sid, deadPid, '2020-01-01T00:00:00.0000000+01:00');
+    fs.writeFileSync(path.join(sb.tmp, 'released_' + sid), '');
+    const r = runPs(['-Once'], sb.env);
+    eq('C7 -Once exits 0', r.status, 0);
+    eq('C7 released session NOT revived by the daemon', fs.existsSync(sb.argsFile), false);
+    eq('C7 busy marker PRESERVED (release must stay undoable)', fs.existsSync(busyMarkerPath(sb.tmp, sid)), true);
+    eq('C7 no chain link burned', fs.existsSync(path.join(sb.tmp, 'chain_' + sid)), false);
+
+    // ...and an EXPLICIT `brink revive <sid>` still works on that same released session.
+    // Release shields you from the daemon acting on its own; it was never meant to refuse
+    // a direct instruction. Before the post-fix review this printed "Revive FAILED" and
+    // deleted the marker.
+    const r2 = runPs(['-Revive', sid], sb.env);
+    eq('C7 explicit revive of a released session exits 0', r2.status, 0);
+    truthy('C7 explicit revive DID launch claude', fs.existsSync(sb.argsFile));
+    truthy('C7 explicit revive explains the release', /released/i.test((r2.stdout || '')));
+    fs.rmSync(sb.tmp, { recursive: true, force: true });
+  }
+
+  // C8: the revive log must be readable DURING the revive, not locked until it ends, and
+  // must survive a killed run. A single piped Add-Content held an exclusive lock for the
+  // whole revive and flushed only at exit (post-fix review 2026-08-06); per-line appends
+  // keep the handle closed between writes. Asserted via a slow stub: the log already has
+  // the launch record and the first line while claude is still running.
+  {
+    const sb = mkSandbox({ watchdog: { mode: 'auto', cancel_window_seconds: 0 }, resume: { max_chain: 5 } });
+    const sid = 'wd-liveLog-1';
+    // Stub that prints, waits, then prints again — so there is a window to read mid-run.
+    fs.writeFileSync(sb.stub, '@echo off\r\necho FIRST-LINE\r\nping -n 4 127.0.0.1 >nul\r\necho SECOND-LINE\r\nexit /b 0\r\n');
+    sb.writeMarker(sid, deadPid, '2020-01-01T00:00:00.0000000+01:00');
+    const rlog = path.join(sb.tmp, 'slug', sid, '.claude-watchdog.log');
+    const child = spawn('powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, '-Once'],
+      { env: sb.env, stdio: 'ignore' });
+    // Poll for up to ~8s for the log to become READABLE while the revive is in flight.
+    const deadline = Date.now() + 8000;
+    let liveRead = null;
+    while (Date.now() < deadline && liveRead === null) {
+      if (fs.existsSync(rlog)) {
+        try { liveRead = fs.readFileSync(rlog, 'utf8'); } catch { /* locked - keep trying */ }
+      }
+      spawnSync('cmd', ['/c', 'ping', '-n', '2', '127.0.0.1'], { stdio: 'ignore' });
+    }
+    truthy('C8 revive log is readable while the revive is still running (not locked)', liveRead !== null);
+    if (liveRead !== null) truthy('C8 launch record already flushed mid-run', /reviving/i.test(liveRead));
+    try { child.kill(); } catch {}
+    // Cleanup is best-effort here, unlike the other cases: this one deliberately leaves a
+    // revive in flight, and the killed daemon's own grandchildren can still hold the temp
+    // dir for a moment (EPERM). A cleanup race must not fail the assertions above.
+    try { fs.rmSync(sb.tmp, { recursive: true, force: true }); } catch { /* OS will reap %TEMP% */ }
   }
 }
 

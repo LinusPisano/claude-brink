@@ -8,6 +8,25 @@
 param([string]$Sid, [string]$Proj, [int]$Buffer = 90, [string]$Skip = '0', [string]$SessionDir = '', [string]$ClaudeExe = '')
 $sdir = if ($SessionDir) { $SessionDir } else { $Proj }
 
+# Append ONE line to a log, UTF-8, opening and closing the handle each time.
+#
+# Encoding contract (code review 2026-08-05, finding 7): `*>> $log` writes UTF-16LE in
+# PS 5.1 while bare Add-Content writes the ANSI codepage, so this one file used to end up
+# in two incompatible encodings - the single diagnostic artifact the never-fail-silently
+# design depends on was unreadable in any single decoding.
+#
+# Streaming contract (post-fix review 2026-08-06): the first attempt at that fix piped the
+# whole run into ONE Add-Content (`... *>&1 | Add-Content`). Measured: that holds an
+# EXCLUSIVE lock on the log for the entire resume and flushes only at the end - so the log
+# is unreadable exactly while you want to watch it, and a killed resume loses everything.
+# Per-line ForEach-Object keeps the file closed between writes: readable live, durable on kill.
+#
+# -LiteralPath, not -Path: a project path containing [ or ] is a wildcard to -Path, which
+# would silently write nowhere and leave a resume looking successful with no log at all.
+function Write-LogLine($path, $text) {
+  try { Add-Content -LiteralPath $path -Value $text -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+}
+
 $taskName = 'BrinkResume_' + ($Sid -replace '[^\w\-]', '_')
 
 # Project gone at fire time? Nothing to resume into - clean up and bail
@@ -19,11 +38,29 @@ if (-not ($Proj -and (Test-Path -LiteralPath $Proj))) {
 }
 Set-Location -LiteralPath $Proj    # scheduled tasks start in System32 otherwise
 
+# Brink's state/flag directory. Defined here (rather than at the weekly-cap precheck
+# below, where it used to live) because the escape-hatch gate immediately after needs it.
+$brinkDir = if ($env:BRINK_DIR) { $env:BRINK_DIR } else { Join-Path $env:USERPROFILE '.claude\brink' }
+
+# ---- escape-hatch gate (code review 2026-08-05, finding 3) ----
+# resume-dispatch.ps1 gates on these too, but this script is a SEPARATE entry point: a
+# scheduled task registered before the dispatcher existed points straight here, so the
+# check has to live in both places or a legacy task walks around the kill switch.
+# Artifacts are preserved (the user disabled the resume, not the handoff); the one-shot
+# task is unregistered because it has already fired.
+$hatchOnce = ''
+if (Test-Path -LiteralPath (Join-Path $brinkDir 'DISABLED')) { $hatchOnce = 'brink off (global kill switch)' }
+elseif (Test-Path -LiteralPath (Join-Path $brinkDir ('released_' + ($Sid -replace '[^\w.-]', '_')))) { $hatchOnce = "brink release $Sid (per-session)" }
+if ($hatchOnce) {
+  try { & node (Join-Path $PSScriptRoot 'notify.js') "Brink: auto-resume skipped for this session ($hatchOnce). Your handoff is still there." | Out-Null } catch { }
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  exit 0
+}
+
 # Weekly-cap pre-check: a 5h reset can fire while the 7-day window is still maxed -
 # relaunching would just immediately re-pause. If last-known 7d usage is still at/above
 # the weekly pause threshold, re-arm for the WEEKLY reset instead of relaunching now.
 # (Uses the last state.json; it may be stale, but the 7d window moves slowly.)
-$brinkDir = if ($env:BRINK_DIR) { $env:BRINK_DIR } else { Join-Path $env:USERPROFILE '.claude\brink' }
 $statePath = Join-Path $brinkDir 'state.json'
 if (Test-Path $statePath) {
   try {
@@ -77,6 +114,11 @@ $log = Join-Path $sdir '.claude-resume.log'
 # ("No conversation found" - wrong project dir), self-deleted, and told no one.
 # The user found out by coming back to a dead session. Toast the outcome, always.
 $code = -1
+# Launch record, written BEFORE claude runs. The old `*>> $log` redirect created the file
+# even when claude printed nothing; a piped form does not run at all on empty output, so
+# without this line a silent resume would leave NO log — the exact blind spot this file
+# exists to close. It also timestamps the attempt itself, not just claude's output.
+Write-LogLine $log "$((Get-Date).ToString('o')) [resume-once] launching claude --resume $Sid (skip=$Skip)"
 try {
   # Build args once (splat); Skip only appends the danger flag. Two full command
   # lines diverged in review — the $log redirect had to be added to both.
@@ -92,16 +134,23 @@ try {
   # then happens to succeed, the success toast below would otherwise fire and give the
   # user ZERO signal the hardened abs-path broke (the exact silent-degradation class
   # Brink exists to prevent - review fix). Keep the fallback itself (don't hard-fail).
+  # Encoding contract (code review 2026-08-05, finding 7): `*>> $log` writes UTF-16LE in
+  # PS 5.1 while bare `Add-Content` writes the ANSI codepage, so this ONE file used to end
+  # up in two incompatible encodings — the single diagnostic artifact the whole
+  # never-fail-silently design depends on was unreadable in any single decoding. Every
+  # write here now goes through Add-Content -Encoding UTF8 (the merge `*>&1 |` captures
+  # claude's stdout AND stderr, preserving the old redirect's coverage). This is also the
+  # repo-wide UTF-8 rule for PowerShell that produces silent empty output when broken.
   if ($ClaudeExe -and (Test-Path -LiteralPath $ClaudeExe)) {
-    & $ClaudeExe @cargs *>> $log
+    & $ClaudeExe @cargs *>&1 | ForEach-Object { Write-LogLine $log $_ }
   } else {
     $why = if ($ClaudeExe) { "pinned claude path not found at fire time ($ClaudeExe)" } else { "no pinned claude path was resolved at arm time" }
-    "Brink: $why - falling back to bare 'claude' PATH lookup" | Add-Content -Path $log
+    Write-LogLine $log "Brink: $why - falling back to bare 'claude' PATH lookup"
     try { & node (Join-Path $PSScriptRoot 'notify.js') "Brink: resume couldn't find the pinned claude path, trying PATH (headless resume may fail)" | Out-Null } catch { }
-    claude @cargs *>> $log
+    claude @cargs *>&1 | ForEach-Object { Write-LogLine $log $_ }
   }
   $code = $LASTEXITCODE
-} catch { $_ | Out-String | Add-Content -Path $log }
+} catch { Write-LogLine $log ($_ | Out-String) }
 if ($code -eq 0) {
   try { & node (Join-Path $PSScriptRoot 'notify.js') "Brink: auto-resume finished - work continued from HANDOFF.md" | Out-Null } catch { }
 } else {
@@ -114,6 +163,16 @@ if ($code -eq 0) {
 try {
   $t = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
   $next = [datetime]::Parse($t.Triggers[0].StartBoundary)
-  if ($next -gt (Get-Date)) { return }   # re-armed during the resumed session - keep it
+  if ($next -gt (Get-Date)) {
+    # Re-armed during the resumed session - keep the task AND tell the dispatcher.
+    # Code review 2026-08-05, finding 6: this used to `return`, which handed the
+    # dispatcher whatever exit code claude produced (normally 0). The dispatcher read
+    # that as "resolved" and deleted HANDOFF.md - the exact file the future trigger we
+    # just preserved will point the model at when it fires. Sentinel 43 means "the
+    # resume DID run, but a later trigger is armed, so the artifacts are still needed"
+    # (distinct from 42 = "re-armed INSTEAD of resuming"). Both preserve; only 43 means
+    # a resume actually happened.
+    exit 43
+  }
 } catch { }
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue

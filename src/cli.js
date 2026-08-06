@@ -114,14 +114,84 @@ function uninstall() {
   // Matches both the direct sensor wiring AND the Task-10 auto-wrap (statusline-wrap.js
   // wrapping a pre-existing custom statusLine) - either way, restore from the backup.
   if (s.statusLine && /statusline-brink\.js|statusline-wrap\.js/.test(JSON.stringify(s.statusLine))) {
+    // Code review 2026-08-05, finding 9: restoring from `.brink-bak` alone was wrong.
+    // That backup is written ONCE, at the first `brink init`, and never refreshed — so if
+    // the user adopted a different statusline afterwards and re-ran init, uninstall would
+    // revert them to a command they abandoned months ago. Worse: when the backup had no
+    // statusLine key at all (they had none at first init, added one later), the `delete`
+    // below threw their custom command away outright.
+    // The wrapper itself carries the accurate original: install.js base64-encodes whatever
+    // statusLine it wrapped into `--orig-b64` on EVERY init that wraps (install.js:106).
+    // Prefer that; fall back to the backup only for the bare sensor (which wrapped
+    // nothing, so it has no --orig-b64 to decode); delete only if neither source exists.
+    const wrapped = String((s.statusLine && s.statusLine.command) || '');
+    const m = wrapped.match(/--orig-b64[ \t]+(\S+)/);
     const bak = readJson(settingsPath + '.brink-bak');
-    if (bak && bak.statusLine) { s.statusLine = bak.statusLine; removed.push('statusLine(restored from backup)'); }
-    else { delete s.statusLine; removed.push('statusLine(removed)'); }
+    // Buffer.from(..., 'base64') never throws — it ignores invalid characters — so a
+    // try/catch here would be dead code. Validate by re-encoding instead: a round-trip
+    // mismatch means the token was corrupted, and we fall back to the backup.
+    let decoded = '';
+    if (m) {
+      const d = Buffer.from(m[1], 'base64').toString('utf8');
+      if (d.trim() && Buffer.from(d, 'utf8').toString('base64') === m[1]) decoded = d;
+    }
+    if (decoded) {
+      // Carry the user's sibling keys (padding, refreshInterval, ...) back from the backup
+      // when it has them; the wrapper only ever preserved the command string itself.
+      const base = (bak && bak.statusLine && typeof bak.statusLine === 'object') ? { ...bak.statusLine } : {};
+      s.statusLine = { ...base, type: base.type || 'command', command: decoded };
+      removed.push('statusLine(restored from the wrapper)');
+    } else if (bak && bak.statusLine) {
+      s.statusLine = bak.statusLine; removed.push('statusLine(restored from backup)');
+    } else {
+      delete s.statusLine; removed.push('statusLine(removed)');
+    }
   }
   fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
   console.log(removed.length
     ? `Brink removed from ${settingsPath}: ${removed.join(', ')}`
     : `Nothing to remove - Brink was not installed in ${settingsPath}.`);
+
+  // Code review 2026-08-05, finding 4: uninstall only ever touched settings.json, so the
+  // Windows scheduler entries outlived the package. Two concrete failures:
+  //   - the BrinkWatchdog logon task kept running against a deleted install, and because
+  //     the daemon recreates its own log/lock files it RE-CREATED the very directory
+  //     `--purge` had just deleted, so an uninstall+purge silently left Brink dir behind;
+  //   - pending BrinkResume_<sid> one-shots stayed armed and would fire days later,
+  //     pointing at scripts that no longer exist.
+  // Removing scheduler state is part of removing Brink, so it happens on every uninstall,
+  // not just --purge. Best-effort and non-fatal: a failure here must not abort the
+  // settings.json cleanup that already succeeded.
+  // BRINK_NO_SCHEDULE is the same test seam the arm/watchdog paths honour — it keeps the
+  // suite from ever touching the real Task Scheduler.
+  if (os.platform() === 'win32' && process.env.BRINK_NO_SCHEDULE !== '1') {
+    // The watchdog daemon is a live PROCESS, not just a task, so it goes through
+    // watchdog-admin.ps1 (which stops it, then unregisters) rather than a bare
+    // Unregister-ScheduledTask. Only invoked when the task actually exists, so a user who
+    // never enabled the watchdog doesn't get told something was removed.
+    try {
+      const present = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "if (Get-ScheduledTask -TaskName 'BrinkWatchdog' -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }"],
+        { encoding: 'utf8', timeout: 60000 });
+      if ((present.stdout || '').trim() === 'yes') {
+        const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+          path.join(SRC, 'watchdog-admin.ps1'), '-Action', 'uninstall'], { encoding: 'utf8', timeout: 60000 });
+        if ((r.status || 0) === 0) console.log('Watchdog daemon stopped, logon task unregistered.');
+        else console.log('Note: watchdog task may remain - check: schtasks /query /tn BrinkWatchdog');
+      }
+    } catch {}
+    // Pending one-shot resumes are named BrinkResume_<sanitized sid> (arm-resume.ps1).
+    // Left behind, they fire days later against scripts that no longer exist.
+    try {
+      const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "$t = @(Get-ScheduledTask -TaskName 'BrinkResume_*' -ErrorAction SilentlyContinue); " +
+        'if ($t.Count) { $t | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue }; $t.Count'],
+        { encoding: 'utf8', timeout: 60000 });
+      const n = parseInt((r.stdout || '').trim(), 10);
+      if (n > 0) console.log(`Unregistered ${n} pending scheduled resume task(s).`);
+    } catch {}
+  }
+
   console.log(`State dir kept at ${DIR} (delete it yourself, or run: brink uninstall --purge)`);
   if (argv.includes('--purge')) {
     try { fs.rmSync(DIR, { recursive: true, force: true }); console.log('State dir purged.'); } catch {}

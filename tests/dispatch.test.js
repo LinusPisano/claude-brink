@@ -541,4 +541,72 @@ console.log('Case F — empty -ClaudeExe => headless fallback still binds params
   try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// Case G — escape hatches stop an ARMED resume (code review 2026-08-05, finding 3).
+// Both hatches used to be checked only on brink.js's pause path, so a scheduled resume
+// ignored them entirely: `brink off` promised "hooks do nothing" while the dispatcher
+// still resumed, and `brink release <sid>` — the per-session opt-out — did not release
+// the session from the one thing it most needed releasing from.
+// Asserted per hatch: claude is NOT launched, and the recovery artifacts SURVIVE (the
+// user disabled the resume, not the handoff — they still need it to continue by hand).
+// ---------------------------------------------------------------------------
+for (const hatch of ['DISABLED', 'released']) {
+  console.log(`Case G/${hatch} — hatch active => armed resume does not fire, handoff survives:`);
+  const sid = 'dispatchG' + hatch;
+  const projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispG-proj-'));
+  const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispG-ctx-'));
+  const brinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispG-dir-'));
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispG-shim-'));
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brink-dispG-sdir-'));
+  const handoffPath = path.join(sessionDir, 'HANDOFF.md');
+  fs.writeFileSync(handoffPath, '# HANDOFF - paused by Brink\nplaceholder for dispatch Case G');
+
+  // Any claude launch at all — abs path or PATH lookup — trips this sentinel.
+  const pathSentinel = path.join(shimDir, 'sentinel.txt');
+  fs.writeFileSync(path.join(shimDir, 'claude.cmd'), `@echo off\r\necho PATH_SENTINEL>"${pathSentinel}"\r\nexit /b 0\r\n`);
+
+  // Write the hatch file the user's command would create:
+  //   brink off            -> <BRINK_DIR>/DISABLED
+  //   brink release <sid>  -> <BRINK_DIR>/released_<sanitized sid>
+  fs.writeFileSync(path.join(brinkDir, hatch === 'DISABLED' ? 'DISABLED' : 'released_' + sid), '');
+
+  const ctxPath = path.join(ctxDir, 'resume-ctx.json');
+  // pid 4 + fabricated start time => PID-reuse guard fails closed => would route to the
+  // headless path, which is exactly what must NOT run while a hatch is active.
+  fs.writeFileSync(ctxPath, JSON.stringify({
+    SessionPid: 4, SessionStartTime: '1999-01-01T00:00:00.000Z', Terminal: 'Conhost',
+    Injectable: true, InjectionMethod: 'AttachConsole_WriteConsoleInput',
+    sid, proj: projDir, continue_prompt: 'continue',
+  }));
+
+  const env = {
+    ...process.env,
+    PATH: shimDir + path.delimiter + (process.env.PATH || ''),
+    Path: shimDir + path.delimiter + (process.env.Path || process.env.PATH || ''),
+    BRINK_SILENT: '1',
+    BRINK_DIR: brinkDir,
+    BRINK_NO_SCHEDULE: '1',
+  };
+  const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', dispatchPs,
+    '-Sid', sid, '-Proj', projDir, '-CtxPath', ctxPath, '-SessionDir', sessionDir],
+    { encoding: 'utf8', env, timeout: 30000 });
+
+  if (!fs.existsSync(pathSentinel)) ok(`${hatch}: claude was NOT launched (hatch honoured at fire time)`);
+  else bad(`${hatch}: claude WAS launched despite the hatch — the kill switch does not reach the resume chain (stdout: ${(r.stdout || '').slice(0, 200)}; stderr: ${(r.stderr || '').slice(0, 200)})`);
+
+  if (fs.existsSync(handoffPath)) ok(`${hatch}: HANDOFF.md preserved (resume disabled, not the handoff)`);
+  else bad(`${hatch}: HANDOFF.md was deleted — a skipped resume must never consume the recovery artifact`);
+
+  if (fs.existsSync(ctxPath)) ok(`${hatch}: resume-ctx.json preserved`);
+  else bad(`${hatch}: resume-ctx.json was deleted despite the resume never running`);
+
+  const chainPath = path.join(brinkDir, 'chain_' + sid);
+  if (!fs.existsSync(chainPath)) ok(`${hatch}: no chain link burned for a resume that never happened`);
+  else bad(`${hatch}: chain_<sid> was incremented even though nothing resumed`);
+
+  for (const d of [projDir, ctxDir, brinkDir, shimDir, sessionDir]) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
+  }
+}
+
 console.log(''); process.exit(fail ? 1 : 0);

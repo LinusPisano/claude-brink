@@ -337,10 +337,39 @@ async function main() {
     // the global kill switch. Let the brink CLI itself through the gate: only a bare
     // `brink` invocation with word-shaped args (no shell metacharacters, no chaining),
     // so the escape hatch cannot double as an arbitrary-command tunnel.
+    //
+    // Code review 2026-08-05, finding 8: the shape check alone was too permissive — it
+    // admitted EVERY subcommand, so the paused agent could run `brink off` or
+    // `brink uninstall --purge` and disarm Brink machine-wide, with no user in the loop,
+    // in the one window Brink exists to hold. The point of the hatch is to let the agent
+    // EXPLAIN the pause and hand the user a narrower way out, not to let it walk out.
+    // So: allowlist the read-only/self-scoped subcommands, deny the destructive ones.
+    //   released here: help, --help, -h, version, --version, -v, doctor, and bare `brink`
+    //   still denied:  release, handoff, off, on, uninstall, init, watchdog, revive, cancel
+    //
+    // `release` is deliberately NOT on this list (post-fix review 2026-08-06). It is the
+    // per-session opt-out — which means an allowlisted `brink release <own sid>` is the
+    // agent lifting its own pause, defeating the gate completely. That was already true,
+    // and this review made it strictly worse: release now also cancels the armed resume
+    // and stops the watchdog, so a self-release would discard the recovery path too.
+    // The deny message prints the exact `brink release <sid>` command for the USER to run;
+    // deciding to disable the safety net is theirs, not the agent's.
+    //
+    // `handoff` is off the list for the same reason it looked harmless: `brink handoff`
+    // prints the newest handoff on the MACHINE, not this session's, so from a paused
+    // session it can surface another project's in-flight work. The pause message already
+    // gives this session's handoff path.
+    // What remains is exactly what the original defect needed: the agent can discover its
+    // options (`brink --help`) and diagnose (`brink doctor`) without being able to act.
+    const SAFE_BRINK_SUBCOMMANDS = new Set(['doctor', 'version', 'help', '--version', '--help', '-v', '-h']);
     try {
       const toolCmd = String((hook.tool_input && hook.tool_input.command) || '');
       const shellTool = hook.tool_name === 'Bash' || hook.tool_name === 'PowerShell';
-      if (shellTool && /^[ \t]*brink(\.cmd)?([ \t]+[\w.:\\/-]+)*[ \t]*$/.test(toolCmd)) process.exit(0);
+      if (shellTool && /^[ \t]*brink(\.cmd)?([ \t]+[\w.:\\/-]+)*[ \t]*$/.test(toolCmd)) {
+        const parts = toolCmd.trim().split(/[ \t]+/);
+        const sub = (parts[1] || '').toLowerCase(); // '' = bare `brink`, which prints help
+        if (sub === '' || SAFE_BRINK_SUBCOMMANDS.has(sub)) process.exit(0);
+      }
     } catch { /* whitelist is best-effort; fall through to the normal deny */ }
 
     // Prefer the hook's own session_id — the shared state.json may hold another

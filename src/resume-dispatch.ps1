@@ -40,10 +40,40 @@ function Log($m){
   if (-not $SessionDir) { return }
   try {
     if (-not (Test-Path -LiteralPath $SessionDir)) { New-Item -ItemType Directory -Path $SessionDir -Force -ErrorAction SilentlyContinue | Out-Null }
-    ((Get-Date).ToString('o') + ' [dispatch] ' + $m) | Add-Content -Path (Join-Path $SessionDir '.claude-resume.log') -ErrorAction SilentlyContinue
+    # -Encoding UTF8: this file is shared with resume-once.ps1, which now writes UTF-8
+    # too (code review 2026-08-05, finding 7 — it used to be part cp1252, part UTF-16LE).
+    ((Get-Date).ToString('o') + ' [dispatch] ' + $m) | Add-Content -Path (Join-Path $SessionDir '.claude-resume.log') -Encoding UTF8 -ErrorAction SilentlyContinue
   } catch {}
 }
 Log "dispatcher fired for sid=$Sid (ctx=$([bool]($CtxPath -and (Test-Path -LiteralPath $CtxPath))))"
+
+# ---- escape-hatch gate (code review 2026-08-05, finding 3) ----
+# Both hatches were checked ONLY on the pause path in brink.js, never here. An armed
+# scheduled resume therefore ignored them completely: `brink off` told the user "Hooks
+# stay installed but do nothing" while this dispatcher would still inject a continue
+# prompt into their live session at reset, and `brink release <sid>` — the per-session
+# opt-out — did not release the one thing a released session most needs releasing from.
+#   DISABLED        global kill switch (`brink off`)
+#   released_<sid>  per-session opt-out (`brink release <sid>`)
+# Both are honoured at FIRE time, not arm time, so flipping either one after a pause has
+# already armed still works — which is the whole point of a kill switch.
+#
+# The pause's recovery artifacts (HANDOFF.md, resume-ctx.json) are deliberately PRESERVED:
+# the user disabled the auto-resume, not the handoff, and they still need it to pick the
+# work back up by hand. The one-shot task IS unregistered — it has fired and will never
+# fire again, so leaving it would just orphan a scheduler entry.
+$brinkDirDisp = if ($env:BRINK_DIR) { $env:BRINK_DIR } else { Join-Path $env:USERPROFILE '.claude\brink' }
+$sidFlagDisp = 'released_' + ($Sid -replace '[^\w.-]', '_')
+$hatchDisp = ''
+if (Test-Path -LiteralPath (Join-Path $brinkDirDisp 'DISABLED')) { $hatchDisp = 'brink off (global kill switch)' }
+elseif (Test-Path -LiteralPath (Join-Path $brinkDirDisp $sidFlagDisp)) { $hatchDisp = "brink release $Sid (per-session)" }
+if ($hatchDisp) {
+  Log "resume SKIPPED - $hatchDisp is active. Handoff + resume-ctx preserved; one-shot task unregistered."
+  Notify "Brink: auto-resume skipped for this session ($hatchDisp). Your handoff is still there."
+  $taskNameDisp = 'BrinkResume_' + ($Sid -replace '[^\w\-]', '_')
+  Unregister-ScheduledTask -TaskName $taskNameDisp -Confirm:$false -ErrorAction SilentlyContinue
+  exit 0
+}
 
 $didInPlace = $false
 if ($CtxPath -and (Test-Path -LiteralPath $CtxPath)) {
@@ -148,14 +178,17 @@ if (-not $didInPlace) {
   if ($ClaudeExe)  { $onceArgs += @('-ClaudeExe', $ClaudeExe) }
   $launchFailed = $false
   try { & powershell @onceArgs } catch { $launchFailed = $true; Log "headless fallback failed to launch: $($_.Exception.Message)" }
-  # Sentinel exit code 42 (see resume-once.ps1): the headless fallback hit its weekly-cap
-  # precheck and RE-ARMED for a later reset instead of actually resuming - the pause is
-  # NOT resolved in that case. A launch failure (the child process never ran at all, e.g.
-  # powershell.exe itself could not be started) is also NOT resolved - only a code
-  # resume-once.ps1 itself returned (0, or whatever claude exited with) means it actually
-  # attempted the resume.
-  $resolved = (-not $launchFailed) -and ($LASTEXITCODE -ne 42)
-  Log "headless fallback exit=$LASTEXITCODE (42 = re-armed for a later reset, pause not resolved)"
+  # Sentinel exit codes from resume-once.ps1 — both mean "a future trigger is armed, so
+  # the ctx/handoff are still needed", and neither may consume the recovery artifacts:
+  #   42  weekly-cap precheck re-armed INSTEAD of resuming (no resume happened)
+  #   43  the resume RAN, but re-armed again inside the resumed session (finding 6:
+  #       treating this as resolved deleted the very HANDOFF.md the preserved task
+  #       points at)
+  # A launch failure (the child never ran at all — e.g. powershell.exe could not start,
+  # or parameter binding failed) is also NOT resolved. Anything else means resume-once.ps1
+  # ran to completion with no future trigger, so the pause really is done.
+  $resolved = (-not $launchFailed) -and ($LASTEXITCODE -ne 42) -and ($LASTEXITCODE -ne 43)
+  Log "headless fallback exit=$LASTEXITCODE (42 = re-armed instead of resuming, 43 = resumed then re-armed; both preserve ctx+handoff)"
 }
 
 # Cleanup (report 2026-07-27 defect A: "the deletion is the damaging part"):

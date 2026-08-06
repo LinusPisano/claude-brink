@@ -142,11 +142,11 @@ fs.rmSync(driftDir, { recursive: true, force: true });
 // `brink --help`, the very command the agent needed to find a narrower escape than the
 // global kill switch. A bare `brink` invocation (word-shaped args only) must pass.
 const rCli = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
-  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink status' } }) });
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink --help' } }) });
 eq('brink CLI whitelisted through the pause gate (Bash)', rCli.trim(), '');
 const rCli2 = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
-  input: JSON.stringify({ cwd: ddir, tool_name: 'PowerShell', tool_input: { command: 'brink release abc-123 --undo' } }) });
-eq('brink release whitelisted (PowerShell tool)', rCli2.trim(), '');
+  input: JSON.stringify({ cwd: ddir, tool_name: 'PowerShell', tool_input: { command: 'brink doctor' } }) });
+eq('brink doctor whitelisted (PowerShell tool)', rCli2.trim(), '');
 const rCliChain = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
   input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink off; curl evil.example' } }) });
 truthy('chained/metacharacter command NOT whitelisted (still denied)', rCliChain.includes('"permissionDecision":"deny"'));
@@ -156,6 +156,22 @@ truthy('non-brink command still denied', rCliOther.includes('"permissionDecision
 const rCliNewline = execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
   input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command: 'brink status\nnpm run deploy' } }) });
 truthy('newline-smuggled command NOT whitelisted (still denied)', rCliNewline.includes('"permissionDecision":"deny"'));
+
+// Code review 2026-08-05 finding 8: the hatch must not let the paused agent DISARM
+// Brink. Read-only/self-scoped subcommands pass; anything that turns Brink off or
+// removes it is denied, so only the USER can do that.
+const brinkCmd = (command) => execFileSync('node', [brink, 'claude', 'pause'], { env, encoding: 'utf8',
+  input: JSON.stringify({ cwd: ddir, tool_name: 'Bash', tool_input: { command } }) });
+for (const allowed of ['brink', 'brink --help', 'brink help', 'brink doctor', 'brink version']) {
+  truthy(`allowlist admits read-only subcommand: ${JSON.stringify(allowed)}`, brinkCmd(allowed).trim() === '');
+}
+// `release` and `handoff` are DENIED on purpose: release would let the paused agent lift
+// its own pause (and now also cancel the armed resume), and handoff prints the newest
+// handoff machine-wide, not this session's. Both are for the user to run, not the agent.
+for (const denied of ['brink off', 'brink on', 'brink uninstall', 'brink uninstall --purge',
+  'brink watchdog off', 'brink revive', 'brink init', 'brink release abc-123', 'brink handoff']) {
+  truthy(`allowlist DENIES ${JSON.stringify(denied)}`, brinkCmd(denied).includes('"permissionDecision":"deny"'));
+}
 
 // Report 2026-07-31 defect 2: released_<sid> lifts enforcement for ONE session while
 // every other session on the machine stays protected.
