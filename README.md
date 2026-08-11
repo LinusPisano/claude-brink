@@ -19,6 +19,22 @@ brink doctor    # verifies the whole chain on YOUR machine
 
 That's it. `brink init` is idempotent, backs up your `settings.json` first, and never clobbers an existing custom statusline (see [Config](#config)). Run `brink doctor` after — it exercises the real chain end-to-end and tells you loudly if anything on your machine isn't wired.
 
+### Turn on auto-resume (opt-in — it ships OFF)
+
+Out of the box Brink **pauses and writes the handoff, but does not resume anything**. If you also want it to bring your session back when the quota resets, flip one flag — two ways:
+
+**Option A — edit the config yourself.** In `~/.claude/brink/config.json`:
+
+```json
+"resume": { "enabled": true }
+```
+
+**Option B — let your agent do it.** Paste this into Claude Code:
+
+> Enable Brink auto-resume: in `~/.claude/brink/config.json`, set `resume.enabled` to `true`. Change nothing else, then show me the resulting `resume` block.
+
+Why off by default? Auto-resume spends your fresh quota unattended and (on Windows) types into your live terminal — that's a choice you should make, not inherit. See [Config](#config) for the guardrails around it (`resume.max_chain`, `resume.skip_permissions`).
+
 ## How it works
 
 1. A statusline sensor reads your usage percentage every refresh and writes it to a small state file.
