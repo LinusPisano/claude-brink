@@ -193,6 +193,39 @@ const idle1h = projectedDecision(incStale, incSamples, CFG, projectionCfg({}), I
 eq('an hour idle is clamped to the same blind interval', idle1h && idle1h.projected.blind_sec, 300);
 eq('and therefore the same estimate', idle1h && idle1h.projected.estimated_now, atGate && atGate.projected.estimated_now);
 
+// --- Regression: the false pause of 2026-08-19 15:25 ---
+// Raising headroom to 20 on the OLD span-to-`now` arithmetic paused four live sessions
+// inside 35 minutes, at 80% — right after the 75% warn, nowhere near the 93% threshold.
+// The sensor had been silent for 596 s, then reported 71% and 80% twelve seconds apart:
+// a catch-up, not a burn. The old code counted the 103 s of silence after those samples
+// as observation time, got a 128 s span, and called it 4.2/min. The meter actually moved
+// 80% -> 82% over the next 5.6 minutes: 0.36/min, a 12x over-read.
+//
+// Time anchoring is what rejects this: measured to `updated_at` the samples span 25 s,
+// below min_span_sec, so there is no trend to extrapolate. Dense data still fires (above);
+// thin data must not.
+console.log('regression: 2026-08-19 15:25 false pause (thin evidence):');
+const FP_FROZE = 1787146400;                 // last reading, 80%
+const fpReset = FP_FROZE + 9000;
+const fpUsage = {
+  five_pct: 80, week_pct: 45, five_reset: fpReset, week_reset: fpReset + 400000,
+  updated_at: FP_FROZE,
+};
+// Only 25 s of samples, preceded by ~10 minutes of silence.
+const fpSamples = [
+  { t: FP_FROZE - 25, five_pct: 71, week_pct: 44, five_reset: fpReset, week_reset: fpReset + 400000 },
+  { t: FP_FROZE - 21, five_pct: 71, week_pct: 44, five_reset: fpReset, week_reset: fpReset + 400000 },
+  { t: FP_FROZE - 13, five_pct: 80, week_pct: 45, five_reset: fpReset, week_reset: fpReset + 400000 },
+  { t: FP_FROZE, five_pct: 80, week_pct: 45, five_reset: fpReset, week_reset: fpReset + 400000 },
+];
+eq('25s of samples is not a trend, however steep',
+  projectedDecision(fpUsage, fpSamples, CFG, projectionCfg({}), FP_FROZE + 103), null);
+eq('and still not one two minutes later',
+  projectedDecision(fpUsage, fpSamples, CFG, projectionCfg({}), FP_FROZE + 223), null);
+// The silence must not be laundered into observation time by widening the window.
+eq('a wider window does not manufacture the span',
+  projectedDecision(fpUsage, fpSamples, CFG, projectionCfg({ projection: { window_sec: 7200 } }), FP_FROZE + 103), null);
+
 // Contradictory same-second rows (08-19: 26% and 73% one second apart in one file).
 // The low twin must not become the baseline and manufacture a rate.
 console.log('contradictory same-timestamp samples:');
