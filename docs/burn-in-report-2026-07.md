@@ -44,6 +44,10 @@ The 5h limit was reached *during* a running subagent (Agent tool); the burn cros
 
 **Open sub-investigation:** whether subagent-internal tool calls traverse the user's PreToolUse hooks at all (if they do, the gate already covers them and only the single-long-call gap remains; if not, projection is the only cover). Test recipe: run a cheap subagent while a logging PreToolUse hook is active; check whether its tool calls appear.
 
+> **RESOLVED 2026-08-19 — yes, they do, including background `Workflow()` fan-outs.** A `stale_` marker was written five minutes into an 8-minute sensor freeze while the main session was idle behind a 10-agent workflow; only a gate run writes one. The gate covers subagent calls — it was reading a frozen number, not failing to run. (What the artifacts cannot show is *which* session's call triggered that run; follow-up #1 in the 08-19 report is to log `session_id` on gate runs so the next one can name it.) See `sensor-freeze-report-2026-08-19.md`.
+>
+> **Note on the "12 points" figure above:** that was the shipped `projection.headroom` default at the time. It was raised to **20** on 2026-08-19, along with a fix to the rate anchoring — the arithmetic described in this paragraph measured the span to `now` while the reading was pinned at `updated_at`, so the rate decayed to nothing during exactly the freeze it was meant to cover. This report is left as written; the correction lives in the 08-19 report.
+
 ### F2 — Weekly meter dropped 95 → 4 without a reset (07-15 → 07-16) — **fix shipped, verdict corrected**
 
 The 07-16 09:15 weekly pause quoted "resets Jul 19, 08:00" — but by ~10:42 the same window read 4% with the reset epoch unchanged. **The initial in-session diagnosis ("stale reading carried over from a cross-machine resume") was WRONG and is retracted:** the flag record shows an organic escalation (80% on 07-14 23:32, 90% on 07-15 14:51, pause 07-15 19:07) confirmed by four independent sessions arming on the same reset. The 95% was real when written.

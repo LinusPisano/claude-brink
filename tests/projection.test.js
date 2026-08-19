@@ -19,10 +19,11 @@ console.log('projectionCfg:');
 const dflt = projectionCfg({});
 eq('default enabled', dflt.enabled, true);
 eq('default lookahead', dflt.lookahead_min, 10);
-eq('default headroom', dflt.headroom, 12);
+eq('default headroom', dflt.headroom, 20);
 eq('enabled:false honored', projectionCfg({ projection: { enabled: false } }).enabled, false);
 eq('garbage clamps to default', projectionCfg({ projection: { lookahead_min: -5, headroom: 999 } }).lookahead_min, 10);
-eq('garbage headroom clamps', projectionCfg({ projection: { headroom: 999 } }).headroom, 12);
+eq('garbage headroom clamps', projectionCfg({ projection: { headroom: 999 } }).headroom, 20);
+eq('explicit headroom 12 still honored', projectionCfg({ projection: { headroom: 12 } }).headroom, 12);
 eq('valid override kept', projectionCfg({ projection: { lookahead_min: 5 } }).lookahead_min, 5);
 
 console.log('projectedDecision:');
@@ -139,6 +140,68 @@ eq('missing updated_at => null (cannot judge)', stalenessCheck({}, SCFG, SNOW), 
 eq('future timestamp (clock skew) => null', stalenessCheck({ updated_at: SNOW + 120 }, SCFG, SNOW), null);
 // The guard is advisory only — pausing on age would pause on no evidence at all.
 truthy('never returns a pause action', !('action' in (stalenessCheck({ updated_at: SNOW - 900 }, SCFG, SNOW) || {})));
+
+// --- Regression: the 2026-08-19 sensor-freeze incident ---
+// A 10-agent workflow fan-out burned the 5h window 75% -> 102% in 8m15s while the
+// statusline (the sensor) sat frozen. The gate ran throughout and read 75% every
+// time. At the then-default headroom 12 the projection was never even considered:
+// it only wakes at pause-headroom = 81%. Replaying the real history put the cutoff
+// at 18, so the default moved to 20. This locks that in — if the default ever drifts
+// back below 18, this fails instead of silently reopening the hole.
+console.log('regression: 2026-08-19 sensor freeze:');
+const INC_NOW = 1787131721;              // 11:28:41 CEST, last live reading
+const incReset = INC_NOW + 5000;
+const incUsage = { five_pct: 75, week_pct: 34, five_reset: incReset, week_reset: incReset + 400000 };
+// 600s of same-window history climbing 34% -> 75% (the measured 4.3 pts/min burn)
+const incSamples = [
+  { t: INC_NOW - 600, five_pct: 34, week_pct: 30, five_reset: incReset, week_reset: incReset + 400000 },
+  { t: INC_NOW - 300, five_pct: 52, week_pct: 32, five_reset: incReset, week_reset: incReset + 400000 },
+  { t: INC_NOW - 60, five_pct: 73, week_pct: 34, five_reset: incReset, week_reset: incReset + 400000 },
+];
+const incNew = projectedDecision(incUsage, incSamples, CFG, projectionCfg({}), INC_NOW);
+truthy('shipped default pauses on the incident burn', incNew && incNew.action === 'pause');
+eq('the old headroom 12 would NOT have paused',
+  projectedDecision(incUsage, incSamples, CFG, projectionCfg({ projection: { headroom: 12 } }), INC_NOW), null);
+truthy('cutoff is at headroom 18',
+  !!projectedDecision(incUsage, incSamples, CFG, projectionCfg({ projection: { headroom: 18 } }), INC_NOW));
+truthy('shipped default is at or above that cutoff', projectionCfg({}).headroom >= 18);
+
+// The headroom alone only covered the first ~3 minutes of the freeze. The gate is only
+// PROVEN to have run at 11:33:50 (+309s), where the old span-to-`now` arithmetic had
+// decayed the rate to 0.33/min and went quiet at every legal headroom. Time anchoring
+// is what actually covers the incident, so assert it at that exact moment.
+console.log('regression: rate must survive the freeze (time anchoring):');
+const incStale = { ...incUsage, updated_at: INC_NOW };   // reading frozen at 11:28:41
+const GATE_RUN = INC_NOW + 309;                          // 11:33:50, proven by the stale marker
+const atGate = projectedDecision(incStale, incSamples, CFG, projectionCfg({}), GATE_RUN);
+truthy('pauses at the proven gate run 5 min into the freeze', atGate && atGate.action === 'pause');
+truthy('rate is measured over the OBSERVED interval, not diluted by the freeze',
+  atGate && atGate.projected.rate_per_min > 3);
+truthy('reports the estimate it acted on', atGate && atGate.projected.estimated_now >= 93);
+eq('blind interval is capped at blind_cap_sec', atGate && atGate.projected.blind_sec, 300);
+
+// A fresh sensor must behave exactly as before — same verdict, and no extrapolation
+// fields in the payload that callers already log.
+const freshAt = projectedDecision({ ...incUsage, updated_at: INC_NOW }, incSamples, CFG, projectionCfg({}), INC_NOW);
+truthy('fresh reading still pauses on a real burn', freshAt && freshAt.action === 'pause');
+truthy('fresh reading carries no extrapolation fields', freshAt && !('estimated_now' in freshAt.projected));
+eq('a stampless reading takes the legacy path', 'updated_at' in incUsage, false);
+
+// Capped, so age alone can never carry a session over the line: an hour of idling
+// must land on exactly the same estimate as five minutes of it.
+const idle1h = projectedDecision(incStale, incSamples, CFG, projectionCfg({}), INC_NOW + 3600);
+eq('an hour idle is clamped to the same blind interval', idle1h && idle1h.projected.blind_sec, 300);
+eq('and therefore the same estimate', idle1h && idle1h.projected.estimated_now, atGate && atGate.projected.estimated_now);
+
+// Contradictory same-second rows (08-19: 26% and 73% one second apart in one file).
+// The low twin must not become the baseline and manufacture a rate.
+console.log('contradictory same-timestamp samples:');
+const twinBase = { t: INC_NOW - 300, five_pct: 73, week_pct: 30, five_reset: incReset, week_reset: incReset + 400000 };
+const twinLow = { ...twinBase, five_pct: 26 };
+const twins = projectedDecision(incUsage, [twinLow, twinBase], CFG, projectionCfg({}), INC_NOW);
+eq('the low twin is discarded (no fabricated pause)', twins, null);
+truthy('and the honest pair alone stays quiet too',
+  projectedDecision(incUsage, [twinBase], CFG, projectionCfg({}), INC_NOW) === null);
 
 // Wiring, not just units. The projection shipped with green unit tests and a dead
 // trigger because it was gated on `action === 'allow'` while the headroom zone always

@@ -7,13 +7,14 @@
     "five_hour": { "warn": [75, 85], "pause": 93 },
     "seven_day": { "warn": [80, 90], "pause": 95 }
   },
-  "_projection_comment": "Burn-rate projection (default ON). At each pre-tool check, if usage is within `headroom` points of the pause threshold AND the sustained burn rate (measured over at least min_span_sec of same-window sensor history) projects past the threshold within lookahead_min, Brink pauses pre-emptively - a few minutes early beats hitting the hard limit inside a long tool call, where no check runs and no pause is possible. Set enabled:false to pause only on the raw thresholds.",
+  "_projection_comment": "Burn-rate projection (default ON). At each pre-tool check, if usage is within `headroom` points of the pause threshold AND the sustained burn rate (measured over at least min_span_sec of same-window sensor history) projects past the threshold within lookahead_min, Brink pauses pre-emptively - a few minutes early beats hitting the hard limit inside a long tool call, where no check runs and no pause is possible. Set enabled:false to pause only on the raw thresholds. The rate is measured over the OBSERVED interval (oldest sample -> the reading's updated_at) and then carried across the blind interval (updated_at -> now) to estimate where the meter stands now; headroom and the projection are judged on that estimate. blind_cap_sec bounds how far a rate may be carried, so a session that merely sat idle cannot pause on the passage of time. Both defaults changed after the 2026-08-19 sensor-freeze incident (headroom 12 -> 20, time anchoring added): a subagent fan-out burned 27 points in 8 minutes while the sensor was frozen, and the old arithmetic measured the span to `now`, so the rate decayed to nothing exactly when it was needed. See docs/sensor-freeze-report-2026-08-19.md.",
   "projection": {
     "enabled": true,
     "lookahead_min": 10,
-    "headroom": 12,
+    "headroom": 20,
     "min_span_sec": 120,
-    "window_sec": 600
+    "window_sec": 600,
+    "blind_cap_sec": 300
   },
   "_staleness_comment": "Brink reads usage from the state file the statusline writes, and the statusline only refreshes on main-session activity. Work that burns tokens away from the main conversation (a background workflow, a large subagent fan-out) can leave that reading frozen while the real usage climbs. When a reading is older than max_age_sec, Brink says so instead of trusting it. It never pauses on age alone - a stale reading cannot tell anyone the real number - so this is a warning, not a gate.",
   "staleness": {
